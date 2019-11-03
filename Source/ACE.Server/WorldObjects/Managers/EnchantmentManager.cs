@@ -153,7 +153,7 @@ namespace ACE.Server.WorldObjects.Managers
 
             // if none, add new record
             if (entries.Count == 0)
-            {
+            {                
                 var newEntry = BuildEntry(spell, caster, equip);
                 newEntry.LayerId = 1;
                 WorldObject.Biota.AddEnchantment(newEntry, WorldObject.BiotaDatabaseLock);

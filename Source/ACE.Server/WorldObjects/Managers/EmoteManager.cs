@@ -207,7 +207,21 @@ namespace ACE.Server.WorldObjects.Managers
                     {
                         var spell = new Spell((uint)emote.SpellId);
                         if (!spell.NotFound)
-                            WorldObject.TryCastSpell(spell, targetObject, WorldObject);
+                        {
+                            var asPlayer = targetObject as Player;
+                            if (asPlayer != null && spell.IsImpenBaneType)
+                            {
+                                var equipment = asPlayer.EquippedObjects.Values.Where(i => (i.WeenieType == WeenieType.Clothing || i.IsShield) && i.IsEnchantable);
+                                foreach (var e in equipment)
+                                {
+                                    WorldObject.TryCastSpell(spell, e, WorldObject);
+                                }
+                            }
+                            else
+                            {
+                                WorldObject.TryCastSpell(spell, targetObject, WorldObject);
+                            }
+                        }
                     }
                     break;
 
