@@ -43,27 +43,27 @@ namespace ACE.Server.Factories
         public static WorldObject CreateRare()
         {
             int tier = 0;
-
-            if (ThreadSafeRandom.Next(1, 2500) == 1)   // 1 in 2,500 chance
+            // Modified Rarity Value to make rares more likely to drop
+            if (ThreadSafeRandom.Next(1, 100) == 1)   // 1 in 100 chance
             {
                 tier = 1;
-                if (ThreadSafeRandom.Next(1, 10) == 1)  // 1 in 25,000 chance
+                if (ThreadSafeRandom.Next(1, 25) == 1)  // 1 in 250 chance
                 {
                     tier = 2;
                 }
-                if (ThreadSafeRandom.Next(1, 100) == 1)  // 1 in 250,000 chance
+                if (ThreadSafeRandom.Next(1, 50) == 1)  // 1 in 500 chance
                 {
                     tier = 3;
                 }
-                if (ThreadSafeRandom.Next(1, 1250) == 1)  // 1 in 3,120,000 chance
+                if (ThreadSafeRandom.Next(1, 100) == 1)  // 1 in 1000 chance
                 {
                     tier = 4;
                 }
-                if (ThreadSafeRandom.Next(1, 3017) == 1)  // 1 in 7,542,500 (wiki avg. 7,543,103)
+                if (ThreadSafeRandom.Next(1, 200) == 1)  // 1 in 2000
                 {
                     tier = 5;
                 }
-                if (ThreadSafeRandom.Next(1, 3500) == 1)  // 1 in 8,750,000 chance
+                if (ThreadSafeRandom.Next(1, 300) == 1)  // 1 in 3000
                 {
                     tier = 6;
                 }
