@@ -239,7 +239,7 @@ namespace ACE.Server.WorldObjects
                 if (IsSkillMaxRank(creatureSkill.Ranks, creatureSkill.AdvancementClass))
                 {
                     // fireworks on rank up is 0x8D
-                    PlayParticleEffect(ACE.Entity.Enum.PlayScript.WeddingBliss, Guid);
+                    PlayParticleEffect(PlayScript.WeddingBliss, Guid);
                     messageText = $"Your base {skill.ToSentence()} is now {creatureSkill.Base} and has reached its upper limit!";
                 }
                 else
@@ -249,6 +249,10 @@ namespace ACE.Server.WorldObjects
                 Session.Network.EnqueueSend(new GameMessagePrivateUpdateSkill(this, creatureSkill));
                 Session.Network.EnqueueSend(new GameMessageSound(Guid, Sound.RaiseTrait, 1f));
                 Session.Network.EnqueueSend(new GameMessageSystemChat(messageText, ChatMessageType.Advancement));
+
+                // retail was missing the 'raise skill' runrate hook here
+                if (skill == Skill.Run && PropertyManager.GetBool("runrate_add_hooks").Item)
+                    HandleRunRateUpdate();
             }
             else if (prevXP != creatureSkill.ExperienceSpent)
             {

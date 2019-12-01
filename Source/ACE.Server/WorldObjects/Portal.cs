@@ -1,10 +1,13 @@
 using System;
+
 using ACE.Database.Models.Shard;
 using ACE.Database.Models.World;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
+using ACE.Server.Entity.Actions;
+using ACE.Server.Managers;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 
@@ -131,16 +134,17 @@ namespace ACE.Server.WorldObjects
             // player.Session.Network.EnqueueSend(new GameMessageSystemChat("Portal sending player to destination", ChatMessageType.System));
 #endif
             var portalDest = new Position(Destination);
-            player.AdjustDungeon(portalDest);
+            WorldObject.AdjustDungeon(portalDest);
 
-            player.Teleport(portalDest);
+            WorldManager.ThreadSafeTeleport(player, portalDest, new ActionEventDelegate(() =>
+            {
+                // If the portal just used is able to be recalled to,
+                // save the destination coordinates to the LastPortal character position save table
+                if (!NoRecall)
+                    player.LastPortalDID = OriginalPortal == null ? WeenieClassId : OriginalPortal; // if walking through a summoned portal
 
-            // If the portal just used is able to be recalled to,
-            // save the destination coordinates to the LastPortal character position save table
-            if (!NoRecall)
-                player.LastPortalDID = OriginalPortal == null ? WeenieClassId : OriginalPortal;     // if walking through a summoned portal
-
-            EmoteManager.OnPortal(player);
+                EmoteManager.OnPortal(player);
+            }));
         }
     }
 }

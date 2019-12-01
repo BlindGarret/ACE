@@ -1629,6 +1629,8 @@ namespace ACE.Server.Factories
             new int[] { 2621, 2614, 3957, 6085},
             ////Pierce Prot
             new int[] { 2620, 2613, 3956, 6084},
+            ///Shield
+            new int[] { 5886, 5891, 5896, 6069},
         };
 
         public static readonly int[][] JewelryCantrips =
@@ -1727,6 +1729,8 @@ namespace ACE.Server.Factories
             new int[] { 2621, 2614, 3957, 6085},
             ////Pierce Prot
             new int[] { 2620, 2613, 3956, 6084},
+            ///Shield
+            new int[] { 5886, 5891, 5896, 6069},
         };
 
         public static readonly int[][] WandCantrips =
@@ -2238,6 +2242,8 @@ namespace ACE.Server.Factories
         };
 
         // for logging epic/legendary drops
+        public static HashSet<int> MinorCantrips;
+        public static HashSet<int> MajorCantrips;
         public static HashSet<int> EpicCantrips;
         public static HashSet<int> LegendaryCantrips;
 
@@ -2245,6 +2251,8 @@ namespace ACE.Server.Factories
 
         static LootTables()
         {
+            BuildCantripsTable(ref MinorCantrips, 0);
+            BuildCantripsTable(ref MajorCantrips, 1);
             BuildCantripsTable(ref EpicCantrips, 2);
             BuildCantripsTable(ref LegendaryCantrips, 3);
         }

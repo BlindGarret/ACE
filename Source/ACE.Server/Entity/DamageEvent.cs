@@ -4,6 +4,7 @@ using System.Linq;
 
 using log4net;
 
+using ACE.Common;
 using ACE.Database.Models.Shard;
 using ACE.DatLoader.Entity;
 using ACE.Entity.Enum;
@@ -104,6 +105,8 @@ namespace ACE.Server.Entity
 
         public bool IgnoreMagicResist => Weapon != null ? Weapon.IgnoreMagicResist : false;     // ignores life armor / prots
 
+        public bool Overpower;
+
 
         // player defender
         public BodyPart BodyPart;
@@ -120,6 +123,11 @@ namespace ACE.Server.Entity
         public bool HasDamage => !Evaded && !LifestoneProtection;
 
         public bool CriticalDefended;
+
+        public static HashSet<uint> AllowDamageTypeUndef = new HashSet<uint>()
+        {
+            22545   // Obsidian Spines
+        };
 
         public static DamageEvent CalculateDamage(Creature attacker, Creature defender, WorldObject damageSource, CombatManeuver combatManeuver = null)
         {
@@ -163,12 +171,19 @@ namespace ACE.Server.Entity
             if (defender.Invincible)
                 return 0.0f;
 
+            // overpower
+            if (attacker.Overpower != null)
+                Overpower = Creature.GetOverpower(attacker, defender);
+
             // evasion chance
-            EvasionChance = GetEvadeChance(attacker, defender);
-            if (EvasionChance > ThreadSafeRandom.Next(0.0f, 1.0f))
+            if (!Overpower)
             {
-                Evaded = true;
-                return 0.0f;
+                EvasionChance = GetEvadeChance(attacker, defender);
+                if (EvasionChance > ThreadSafeRandom.Next(0.0f, 1.0f))
+                {
+                    Evaded = true;
+                    return 0.0f;
+                }
             }
 
             // get base damage
@@ -177,7 +192,7 @@ namespace ACE.Server.Entity
             else
                 GetBaseDamage(attacker, CombatManeuver);
 
-            if (DamageType == DamageType.Undef)
+            if (DamageType == DamageType.Undef && !AllowDamageTypeUndef.Contains(damageSource.WeenieClassId))
             {
                 log.Error($"DamageEvent.DoCalculateDamage({attacker?.Name} ({attacker?.Guid}), {defender?.Name} ({defender?.Guid}), {damageSource?.Name} ({damageSource?.Guid})) - DamageType == DamageType.Undef");
                 GeneralFailure = true;
@@ -203,7 +218,7 @@ namespace ACE.Server.Entity
 
             // critical hit?
             var attackSkill = attacker.GetCreatureSkill(attacker.GetCurrentWeaponSkill());
-            CriticalChance = WorldObject.GetWeaponCritChanceModifier(attacker, attackSkill, defender);
+            CriticalChance = WorldObject.GetWeaponCriticalChance(attacker, attackSkill, defender);
             if (CriticalChance > ThreadSafeRandom.Next(0.0f, 1.0f))
             {
                 if (playerDefender != null && playerDefender.AugmentationCriticalDefense > 0)
@@ -271,7 +286,7 @@ namespace ACE.Server.Entity
             else
             {
                 var resistanceType = Creature.GetResistanceType(DamageType);
-                ResistanceMod = (float)defender.GetResistanceMod(resistanceType, Weapon, WeaponResistanceMod);
+                ResistanceMod = (float)Math.Max(0.0f, defender.GetResistanceMod(resistanceType, Weapon, WeaponResistanceMod));
             }
 
             // damage resistance rating
@@ -411,12 +426,17 @@ namespace ACE.Server.Entity
             info += $"AccuracyMod: {AccuracyMod}\n";
             info += $"EffectiveAttackSkill: {EffectiveAttackSkill}\n";
             info += $"EffectiveDefenseSkill: {EffectiveDefenseSkill}\n";
+
+            if (Attacker.Overpower != null)
+                info += $"Overpower: {Overpower} ({Creature.GetOverpowerChance(Attacker, Defender)})\n";
+
             info += $"EvasionChance: {EvasionChance}\n";
             info += $"Evaded: {Evaded}\n";
 
             if (!(Attacker is Player))
             {
-                info += $"CombatManeuver: {CombatManeuver.Style} - {CombatManeuver.Motion}\n";
+                if (CombatManeuver != null)
+                    info += $"CombatManeuver: {CombatManeuver.Style} - {CombatManeuver.Motion}\n";
                 if (AttackPart != null)
                     info += $"AttackPart: {(CombatBodyPart)AttackPart.Key}\n";
             }
@@ -521,6 +541,8 @@ namespace ACE.Server.Entity
                     attackConditions |= AttackConditions.Recklessness;
                 if (SneakAttackMod > 1.0f)
                     attackConditions |= AttackConditions.SneakAttack;
+                if (Overpower)
+                    attackConditions |= AttackConditions.Overpower;
 
                 return attackConditions;
             }

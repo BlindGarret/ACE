@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 
+using ACE.Common;
 using ACE.Database.Models.Shard;
 using ACE.Database.Models.World;
 using ACE.Entity;
@@ -70,7 +71,7 @@ namespace ACE.Server.WorldObjects
                 || SpellType == ProjectileSpellType.Arc || SpellType == ProjectileSpellType.Volley || SpellType == ProjectileSpellType.Blast
                 || WeenieClassId == 7276 || WeenieClassId == 7277 || WeenieClassId == 7279 || WeenieClassId == 7280)
             {
-                PhysicsObj.DefaultScript = ACE.Entity.Enum.PlayScript.ProjectileCollision;
+                PhysicsObj.DefaultScript = PlayScript.ProjectileCollision;
                 PhysicsObj.DefaultScriptIntensity = 1.0f;
             }
 
@@ -89,7 +90,7 @@ namespace ACE.Server.WorldObjects
             {
                 if (spellId == 3818)
                 {
-                    PhysicsObj.DefaultScript = ACE.Entity.Enum.PlayScript.Explode;
+                    PhysicsObj.DefaultScript = PlayScript.Explode;
                     PhysicsObj.DefaultScriptIntensity = 1.0f;
                     ScriptedCollision = true;
                 }
@@ -217,7 +218,7 @@ namespace ACE.Server.WorldObjects
             PhysicsObj.set_active(false);
 
             EnqueueBroadcastPhysicsState();
-            EnqueueBroadcast(new GameMessageScript(Guid, ACE.Entity.Enum.PlayScript.Explode, GetProjectileScriptIntensity(SpellType)));
+            EnqueueBroadcast(new GameMessageScript(Guid, PlayScript.Explode, GetProjectileScriptIntensity(SpellType)));
 
             ActionChain selfDestructChain = new ActionChain();
             selfDestructChain.AddDelaySeconds(5.0);
@@ -278,7 +279,9 @@ namespace ACE.Server.WorldObjects
 
             var critical = false;
             var critDefended = false;
-            var damage = CalculateDamage(ProjectileSource, target, ref critical, ref critDefended);
+            var overpower = false;
+
+            var damage = CalculateDamage(ProjectileSource, target, ref critical, ref critDefended, ref overpower);
 
             // null damage -> target resisted; damage of -1 -> target already dead
             if (damage != null && damage != -1)
@@ -292,12 +295,12 @@ namespace ACE.Server.WorldObjects
                         player.Session.Network.EnqueueSend(dot.Message);
 
                     // corruption / corrosion playscript?
-                    //target.EnqueueBroadcast(new GameMessageScript(target.Guid, ACE.Entity.Enum.PlayScript.HealthDownVoid));
-                    //target.EnqueueBroadcast(new GameMessageScript(target.Guid, ACE.Entity.Enum.PlayScript.DirtyFightingDefenseDebuff));
+                    //target.EnqueueBroadcast(new GameMessageScript(target.Guid, PlayScript.HealthDownVoid));
+                    //target.EnqueueBroadcast(new GameMessageScript(target.Guid, PlayScript.DirtyFightingDefenseDebuff));
                 }
                 else
                 {
-                    DamageTarget(target, damage, critical, critDefended);
+                    DamageTarget(target, damage, critical, critDefended, overpower);
                 }
 
                 if (player != null)
@@ -319,7 +322,7 @@ namespace ACE.Server.WorldObjects
         /// Calculates the damage for a spell projectile
         /// Used by war magic, void magic, and life magic projectiles
         /// </summary>
-        public double? CalculateDamage(WorldObject source, Creature target, ref bool criticalHit, ref bool critDefended)
+        public double? CalculateDamage(WorldObject source, Creature target, ref bool criticalHit, ref bool critDefended, ref bool overpower)
         {
             var sourcePlayer = source as Player;
             var targetPlayer = target as Player;
@@ -345,17 +348,20 @@ namespace ACE.Server.WorldObjects
 
             var resistanceType = Creature.GetResistanceType(Spell.DamageType);
 
+            var sourceCreature = source as Creature;
+            if (sourceCreature?.Overpower != null)
+                overpower = Creature.GetOverpower(sourceCreature, target);
+
             var resisted = source.ResistSpell(target, Spell);
-            if (resisted != null && resisted == true)
+            if (resisted == true && !overpower)
                 return null;
 
             CreatureSkill attackSkill = null;
-            var sourceCreature = source as Creature;
             if (sourceCreature != null)
                 attackSkill = sourceCreature.GetCreatureSkill(Spell.School);
 
             // critical hit
-            var critical = GetWeaponMagicCritFrequencyModifier(sourceCreature, attackSkill, target);
+            var critical = GetWeaponMagicCritFrequency(sourceCreature, attackSkill, target);
             if (ThreadSafeRandom.Next(0.0f, 1.0f) < critical)
             {
                 if (targetPlayer != null && targetPlayer.AugmentationCriticalDefense > 0)
@@ -401,6 +407,22 @@ namespace ACE.Server.WorldObjects
             {
                 if (criticalHit)
                 {
+                    // Original:
+                    // http://acpedia.org/wiki/Announcements_-_2002/08_-_Atonement#Letter_to_the_Players
+
+                    // Critical Strikes: In addition to the skill-based damage bonus, each projectile spell has a 2% chance of causing a critical hit on the target and doing increased damage.
+                    // A magical critical hit is similar in some respects to melee critical hits (although the damage calculation is handled differently).
+                    // While a melee critical hit automatically does twice the maximum damage of the weapon, a magical critical hit will do an additional half the minimum damage of the spell.
+                    // For instance, a magical critical hit from a level 7 spell, which does 110-180 points of damage, would add an additional 55 points of damage to the spell.
+
+                    // Later updated for PvE only:
+
+                    // http://acpedia.org/wiki/Announcements_-_2004/07_-_Treaties_in_Stone#Letter_to_the_Players
+
+                    // Currently when a War Magic spell scores a critical hit, it adds a multiple of the base damage of the spell to a normal damage roll.
+                    // Starting in July, War Magic critical hits will instead add a multiple of the maximum damage of the spell.
+                    // No more crits that do less damage than non-crits!
+
                     if (isPVP) // PvP: 50% of the MIN damage added to normal damage roll
                         damageBonus = Spell.MinDamage * 0.5f;
                     else   // PvE: 50% of the MAX damage added to normal damage roll
@@ -434,9 +456,11 @@ namespace ACE.Server.WorldObjects
 
                 var weaponResistanceMod = GetWeaponResistanceModifier(sourceCreature, attackSkill, Spell.DamageType);
 
+                var resistanceMod = Math.Max(0.0f, target.GetResistanceMod(resistanceType, null, weaponResistanceMod));
+
                 finalDamage = baseDamage + damageBonus + warSkillBonus;
-                finalDamage *= target.GetResistanceMod(resistanceType, null, weaponResistanceMod)
-                    * elementalDmgBonus * slayerBonus * absorbMod;
+
+                finalDamage *= resistanceMod * elementalDmgBonus * slayerBonus * absorbMod;
 
                 return finalDamage;
             }
@@ -555,7 +579,7 @@ namespace ACE.Server.WorldObjects
         /// <summary>
         /// Called for a spell projectile to damage its target
         /// </summary>
-        public void DamageTarget(WorldObject _target, double? damage, bool critical, bool critDefended = false)
+        public void DamageTarget(WorldObject _target, double? damage, bool critical, bool critDefended, bool overpower)
         {
             var player = ProjectileSource as Player;
 
@@ -624,11 +648,13 @@ namespace ACE.Server.WorldObjects
 
                 var critMsg = critical ? "Critical hit! " : "";
                 var sneakMsg = sneakAttackMod > 1.0f ? "Sneak Attack! " : "";
+                var overpowerMsg = overpower ? "Overpower! " : "";
+
                 if (player != null)
                 {
                     var critProt = critDefended ? " Your target's Critical Protection augmentation allows them to avoid your critical hit!" : "";
 
-                    var attackerMsg = $"{critMsg}{sneakMsg}You {verb} {target.Name} for {amount} points with {Spell.Name}.{critProt}";
+                    var attackerMsg = $"{critMsg}{overpowerMsg}{sneakMsg}You {verb} {target.Name} for {amount} points with {Spell.Name}.{critProt}";
 
                     // could these crit / sneak attack?
                     if (Spell.Category == SpellCategory.StaminaLowering || Spell.Category == SpellCategory.ManaLowering)
@@ -647,7 +673,7 @@ namespace ACE.Server.WorldObjects
                 {
                     var critProt = critDefended ? " Your Critical Protection augmentation allows you to avoid a critical hit!" : "";
 
-                    var defenderMsg = $"{critMsg}{sneakMsg}{ProjectileSource.Name} {plural} you for {amount} points with {Spell.Name}.{critProt}";
+                    var defenderMsg = $"{critMsg}{overpowerMsg}{sneakMsg}{ProjectileSource.Name} {plural} you for {amount} points with {Spell.Name}.{critProt}";
 
                     if (Spell.Category == SpellCategory.StaminaLowering || Spell.Category == SpellCategory.ManaLowering)
                     {
@@ -661,7 +687,8 @@ namespace ACE.Server.WorldObjects
             }
             else
             {
-                target.OnDeath(ProjectileSource, Spell.DamageType, critical);
+                var lastDamager = ProjectileSource != null ? new DamageHistoryInfo(ProjectileSource) : null;
+                target.OnDeath(lastDamager, Spell.DamageType, critical);
                 target.Die();
             }
         }

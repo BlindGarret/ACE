@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using ACE.Common;
 using ACE.Database.Models.Shard;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
@@ -54,9 +55,25 @@ namespace ACE.Server.WorldObjects
             return skill.InitLevel + skill.Ranks;
         }
 
+        public float GetProbabilityAny()
+        {
+            var probabilities = new List<float>();
+
+            foreach (var spell in Biota.BiotaPropertiesSpellBook)
+            {
+                var probability = spell.Probability > 2.0f ? spell.Probability - 2.0f : spell.Probability / 100.0f;
+
+                probabilities.Add(probability);
+            }
+
+            return Probability.GetProbabilityAny(probabilities);
+        }
+
         public Spell TryRollSpell()
         {
             CurrentSpell = null;
+
+            //Console.WriteLine($"{Name}.TryRollSpell(), probability={GetProbabilityAny()}");
 
             // monster spellbooks have probabilities with base 2.0
             // ie. a 5% chance would be 2.05 instead of 0.05
@@ -186,16 +203,20 @@ namespace ACE.Server.WorldObjects
 
                 case MagicSchool.LifeMagic:
 
-                    resisted = ResistSpell(target, spell);
-                    if (resisted == null)
-                        log.Error("Something went wrong with the Magic resistance check");
-                    if (resisted ?? true)
-                        break;
+                    // todo: investigate calling TryResistSpell
+                    if (spell.IsHarmful && spell.IsResistable)
+                    {
+                        resisted = ResistSpell(target, spell);
+                        if (resisted == null)
+                            log.Error("Something went wrong with the Magic resistance check");
+                        if (resisted ?? true)
+                            break;
+                    }
 
                     var targetDeath = LifeMagic(spell, out uint damage, out bool critical, out var msg, target);
                     if (targetDeath && target is Creature targetCreature)
                     {
-                        targetCreature.OnDeath(this, DamageType.Health, false);
+                        targetCreature.OnDeath(new DamageHistoryInfo(this), DamageType.Health, false);
                         targetCreature.Die();
                     }
                     if (target != null)
@@ -205,11 +226,14 @@ namespace ACE.Server.WorldObjects
 
                 case MagicSchool.CreatureEnchantment:
 
-                    resisted = ResistSpell(target, spell);
-                    if (resisted == null)
-                        log.Error("Something went wrong with the Magic resistance check");
-                    if (resisted ?? true)
-                        break;
+                    if (spell.IsHarmful && spell.IsResistable)
+                    {
+                        resisted = ResistSpell(target, spell);
+                        if (resisted == null)
+                            log.Error("Something went wrong with the Magic resistance check");
+                        if (resisted ?? true)
+                            break;
+                    }
 
                     CreatureMagic(target, spell);
 
@@ -220,7 +244,7 @@ namespace ACE.Server.WorldObjects
 
                 case MagicSchool.VoidMagic:
 
-                    if (spell.NumProjectiles == 0)
+                    if (spell.NumProjectiles == 0 && spell.IsHarmful && spell.IsResistable)
                     {
                         resisted = ResistSpell(target, spell);
                         if (resisted == null)
