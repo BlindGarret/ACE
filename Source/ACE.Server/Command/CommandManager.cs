@@ -48,10 +48,11 @@ namespace ACE.Server.Command
                 }
             }
 
-            var thread = new Thread(new ThreadStart(CommandThread));
-            thread.Name = "Command Manager";
-            thread.IsBackground = true;
-            thread.Start();
+            // Commenting out for docker
+            // var thread = new Thread(new ThreadStart(CommandThread));
+            // thread.Name = "Command Manager";
+            // thread.IsBackground = true;
+            // thread.Start();
         }
 
         private static void CommandThread()

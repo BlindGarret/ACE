@@ -150,10 +150,9 @@ namespace ACE.Server
             log.Info("Initializing EventManager...");
             EventManager.Initialize();
 
-            // Commenting this out as it floods our docker container logs
             // This should be last
-            // log.Info("Initializing CommandManager...");
-            // CommandManager.Initialize();
+            log.Info("Initializing CommandManager...");
+            CommandManager.Initialize();
 
             if (!PropertyManager.GetBool("world_closed", false).Item)
             {
