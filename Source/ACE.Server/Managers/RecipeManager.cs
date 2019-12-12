@@ -217,7 +217,7 @@ namespace ACE.Server.Managers
                 // imbue: divide success by 3
                 if (recipe.SalvageType == 2)
                 {
-                    successChance /= 3.0f;
+                    successChance *= .85f;
 
                     if (player.AugmentationBonusImbueChance > 0)
                         successChance += player.AugmentationBonusImbueChance * 0.05f;

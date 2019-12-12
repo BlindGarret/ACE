@@ -1,0 +1,1 @@
+update ace_world.recipe_requirements_int set value = 10 where stat = 179 and value = 1 limit 100;
