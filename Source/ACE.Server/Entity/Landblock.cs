@@ -380,24 +380,7 @@ namespace ACE.Server.Entity
             foreach (WorldObject wo in worldObjects.Values)
             {
                 // set to TRUE if object changes landblock
-                var landblockUpdate = false;
-
-                // detect player movement
-                // TODO: handle players the same as everything else
-                if (wo is Player player)
-                {
-                    wo.InUpdate = true;
-
-                    var newPosition = HandlePlayerPhysics(player);
-
-                    // update position through physics engine
-                    if (newPosition != null)
-                        landblockUpdate = wo.UpdatePlayerPhysics(newPosition);
-
-                    wo.InUpdate = false;
-                }
-                else
-                    landblockUpdate = wo.UpdateObjectPhysics();
+                var landblockUpdate = wo.UpdateObjectPhysics();
 
                 if (landblockUpdate)
                     movedObjects.Add(wo);
@@ -405,24 +388,6 @@ namespace ACE.Server.Entity
 
             Monitor5m.Pause();
             Monitor1h.Pause();
-        }
-
-        /// <summary>
-        /// Detects if player has moved through ForcedLocation or RequestedLocation
-        /// </summary>
-        private static Position HandlePlayerPhysics(Player player)
-        {
-            Position newPosition = null;
-
-            if (player.ForcedLocation != null)
-                newPosition = player.ForcedLocation;
-            else if (player.RequestedLocation != null)
-                newPosition = player.RequestedLocation;
-
-            if (newPosition != null)
-                player.ClearRequestedPositions();
-
-            return newPosition;
         }
 
         /// <summary>
@@ -1085,7 +1050,7 @@ namespace ACE.Server.Entity
         /// This is a rarely used method to broadcast network messages to all of the players within a landblock,
         /// and possibly the adjacent landblocks.
         /// </summary>
-        public void EnqueueBroadcast(ICollection<Player> excludeList, bool adjacents, params GameMessage[] msgs)
+        public void EnqueueBroadcast(ICollection<Player> excludeList, bool adjacents, Position pos = null, float? maxRangeSq = null, params GameMessage[] msgs)
         {
             var players = worldObjects.Values.OfType<Player>();
 
@@ -1096,13 +1061,21 @@ namespace ACE.Server.Entity
 
             // broadcast messages to player in this landblock
             foreach (var player in players)
+            {
+                if (pos != null && maxRangeSq != null)
+                {
+                    var distSq = player.Location.SquaredDistanceTo(pos);
+                    if (distSq > maxRangeSq)
+                        continue;
+                }
                 player.Session.Network.EnqueueSend(msgs);
+            }
 
             // if applicable, iterate into adjacent landblocks
             if (adjacents)
             {
                 foreach (var adjacent in this.Adjacents.Where(adj => adj != null))
-                    adjacent.EnqueueBroadcast(excludeList, false, msgs);
+                    adjacent.EnqueueBroadcast(excludeList, false, pos, maxRangeSq, msgs);
             }
         }
 

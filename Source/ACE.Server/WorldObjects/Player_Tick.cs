@@ -1,11 +1,15 @@
 using System;
 using System.Linq;
 
+using ACE.Server.Entity.Actions;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Factories;
-using ACE.Server.Entity.Actions;
+using ACE.Server.Managers;
 using ACE.Server.Network.GameMessages.Messages;
+using ACE.Server.Network.Structure;
+using ACE.Server.Physics;
+using ACE.Server.Physics.Common;
 
 namespace ACE.Server.WorldObjects
 {
@@ -73,6 +77,171 @@ namespace ACE.Server.WorldObjects
                 SavePlayerToDatabase();
 
             base.Heartbeat(currentUnixTime);
+        }
+
+        public void OnMoveToState(MoveToState moveToState)
+        {
+            if (RecordCast.Enabled)
+                RecordCast.OnMoveToState(moveToState);
+        }
+
+        public bool InUpdate;
+
+        public override bool UpdateObjectPhysics()
+        {
+            try
+            {
+                stopwatch.Restart();
+
+                bool landblockUpdate = false;
+
+                InUpdate = true;
+
+                // update position through physics engine
+                if (RequestedLocation != null)
+                {
+                    landblockUpdate = UpdatePlayerPosition(RequestedLocation);
+                    RequestedLocation = null;
+                }
+
+                InUpdate = false;
+
+                return landblockUpdate;
+            }
+            finally
+            {
+                var elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+                ServerPerformanceMonitor.AddToCumulativeEvent(ServerPerformanceMonitor.CumulativeEventHistoryType.Player_Tick_UpdateObjectPhysics, elapsedSeconds);
+                if (elapsedSeconds >= 1) // Yea, that ain't good....
+                    log.Warn($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}");
+                else if (elapsedSeconds >= 0.010)
+                    log.Debug($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}");
+            }
+        }
+
+        /// <summary>
+        /// Used by physics engine to actually update a player position
+        /// Automatically notifies clients of updated position
+        /// </summary>
+        /// <param name="newPosition">The new position being requested, before verification through physics engine</param>
+        /// <returns>TRUE if object moves to a different landblock</returns>
+        public bool UpdatePlayerPosition(ACE.Entity.Position newPosition, bool forceUpdate = false)
+        {
+            //Console.WriteLine($"{Name}.UpdatePlayerPhysics({newPosition}, {forceUpdate}, {Teleporting})");
+
+            // possible bug: while teleporting, client can still send AutoPos packets from old landblock
+            if (Teleporting && !forceUpdate) return false;
+
+            // pre-validate movement
+            if (!ValidateMovement(newPosition))
+            {
+                log.Error($"{Name}.UpdatePlayerPhysics() - movement pre-validation failed from {Location} to {newPosition}");
+                return false;
+            }
+
+            try
+            {
+                if (!forceUpdate) // This is needed beacuse this function might be called recursively
+                    stopwatch.Restart();
+
+                var success = true;
+
+                if (PhysicsObj != null)
+                {
+                    var distSq = Location.SquaredDistanceTo(newPosition);
+
+                    if (distSq > PhysicsGlobals.EpsilonSq)
+                    {
+                        var curCell = LScape.get_landcell(newPosition.Cell);
+                        if (curCell != null)
+                        {
+                            //if (PhysicsObj.CurCell == null || curCell.ID != PhysicsObj.CurCell.ID)
+                            //PhysicsObj.change_cell_server(curCell);
+
+                            PhysicsObj.set_request_pos(newPosition.Pos, newPosition.Rotation, curCell, Location.LandblockId.Raw);
+                            success = PhysicsObj.update_object_server();
+
+                            if (PhysicsObj.CurCell == null && curCell.ID >> 16 != 0x18A)
+                            {
+                                PhysicsObj.CurCell = curCell;
+                            }
+
+                            CheckMonsters();
+                        }
+                    }
+                }
+
+                // double update path: landblock physics update -> updateplayerphysics() -> update_object_server() -> Teleport() -> updateplayerphysics() -> return to end of original branch
+                if (Teleporting && !forceUpdate) return true;
+
+                if (!success) return false;
+
+                var landblockUpdate = Location.Cell >> 16 != newPosition.Cell >> 16;
+
+                Location = newPosition;
+
+                if (RecordCast.Enabled)
+                    RecordCast.Log($"CurPos: {Location.ToLOCString()}");
+
+                SendUpdatePosition();
+
+                if (!InUpdate)
+                    LandblockManager.RelocateObjectForPhysics(this, true);
+
+                return landblockUpdate;
+            }
+            finally
+            {
+                if (!forceUpdate) // This is needed beacuse this function might be called recursively
+                {
+                    var elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+                    ServerPerformanceMonitor.AddToCumulativeEvent(ServerPerformanceMonitor.CumulativeEventHistoryType.Player_Tick_UpdateObjectPhysics, elapsedSeconds);
+                    if (elapsedSeconds >= 1) // Yea, that ain't good....
+                        log.Warn($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdatePlayerPhysics() at loc: {Location}");
+                    else if (elapsedSeconds >= 0.010)
+                        log.Debug($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdatePlayerPhysics() at loc: {Location}");
+                }
+            }
+        }
+
+        public bool ValidateMovement(ACE.Entity.Position newPosition)
+        {
+            if (CurrentLandblock == null)
+                return false;
+
+            if (!Teleporting && Location.Landblock != newPosition.Cell >> 16)
+            {
+                if ((Location.Cell & 0xFFFF) >= 0x100 && (newPosition.Cell & 0xFFFF) >= 0x100)
+                    return false;
+
+                if (CurrentLandblock.IsDungeon)
+                {
+                    var destBlock = LScape.get_landblock(newPosition.Cell);
+                    if (destBlock != null && destBlock.IsDungeon)
+                        return false;
+                }
+            }
+            return true;
+        }
+
+
+        public bool SyncLocationWithPhysics()
+        {
+            if (PhysicsObj.CurCell == null)
+            {
+                Console.WriteLine($"{Name}.SyncLocationWithPhysics(): CurCell is null!");
+                return false;
+            }
+
+            var blockcell = PhysicsObj.Position.ObjCellID;
+            var pos = PhysicsObj.Position.Frame.Origin;
+            var rotate = PhysicsObj.Position.Frame.Orientation;
+
+            var landblockUpdate = blockcell << 16 != CurrentLandblock.Id.Landblock;
+
+            Location = new ACE.Entity.Position(blockcell, pos, rotate);
+
+            return landblockUpdate;
         }
 
         private bool gagNoticeSent = false;
@@ -203,6 +372,11 @@ namespace ACE.Server.WorldObjects
                     }
                 }
             }
+        }
+
+        public override void HandleMotionDone(uint motionID, bool success)
+        {
+            //Console.WriteLine($"{Name}.HandleMotionDone({(MotionCommand)motionID}, {success})");
         }
     }
 }

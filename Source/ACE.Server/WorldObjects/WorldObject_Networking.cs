@@ -376,10 +376,10 @@ namespace ACE.Server.WorldObjects
             }
 
             if ((physicsDescriptionFlag & PhysicsDescriptionFlag.DefaultScript) != 0)
-                writer.Write(Convert.ToUInt32(PhysicsObj?.DefaultScript ?? 0u));
+                writer.Write(DefaultScriptId ?? 0);
 
             if ((physicsDescriptionFlag & PhysicsDescriptionFlag.DefaultScriptIntensity) != 0)
-                writer.Write(PhysicsObj?.DefaultScriptIntensity ?? 0f);
+                writer.Write(DefaultScriptIntensity ?? 0f);
 
             // timestamps
             writer.Write(Sequences.GetCurrentSequence(SequenceType.ObjectPosition));        // 0
@@ -395,12 +395,18 @@ namespace ACE.Server.WorldObjects
             writer.Align();
         }
 
+        public DateTime LastUpdatePosition;
+
         /// <summary>
         /// Broadcast position updates to players within range
         /// </summary>
-        protected void SendUpdatePosition()
+        public void SendUpdatePosition()
         {
+            //Console.WriteLine($"{Name}.SendUpdatePosition({Location.ToLOCString()})");
+
             EnqueueBroadcast(new GameMessageUpdatePosition(this));
+
+            LastUpdatePosition = DateTime.UtcNow;
         }
 
         public virtual void SendPartialUpdates(Session targetSession, List<GenericPropertyId> properties)
@@ -478,10 +484,10 @@ namespace ACE.Server.WorldObjects
             if (Omega != null)
                 physicsDescriptionFlag |= PhysicsDescriptionFlag.Omega;
 
-            if (PhysicsObj?.DefaultScript != null)
+            if (DefaultScriptId != null)
                 physicsDescriptionFlag |= PhysicsDescriptionFlag.DefaultScript;
 
-            if (PhysicsObj?.DefaultScriptIntensity != null)
+            if (DefaultScriptIntensity != null)
                 physicsDescriptionFlag |= PhysicsDescriptionFlag.DefaultScriptIntensity;
 
             return physicsDescriptionFlag;
@@ -852,18 +858,6 @@ namespace ACE.Server.WorldObjects
             else
                 ObjectDescriptionFlags &= ~flag;
         }
-
-        public void ClearRequestedPositions()
-        {
-            ForcedLocation = null;
-            RequestedLocation = null;
-        }
-
-        public void ClearPreviousLocation()
-        {
-            PreviousLocation = null;
-        }
-
 
         public bool? IgnoreCloIcons
         {

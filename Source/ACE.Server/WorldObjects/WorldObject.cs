@@ -21,6 +21,7 @@ using ACE.Server.Network;
 using ACE.Server.Network.GameEvent.Events;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.Sequence;
+using ACE.Server.Network.Structure;
 using ACE.Server.Physics;
 using ACE.Server.Physics.Animation;
 using ACE.Server.Physics.Common;
@@ -103,10 +104,6 @@ namespace ACE.Server.WorldObjects
             InitializeHeartbeats();
 
             CreationTimestamp = (int)Time.GetUnixTime();
-
-            // TODO: fix weenie data
-            if (Lifespan != null)
-                RemainingLifespan = Lifespan;
         }
 
         /// <summary>
@@ -416,28 +413,6 @@ namespace ACE.Server.WorldObjects
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         // ******************************************************************* OLD CODE BELOW ********************************
         // ******************************************************************* OLD CODE BELOW ********************************
         // ******************************************************************* OLD CODE BELOW ********************************
@@ -446,27 +421,16 @@ namespace ACE.Server.WorldObjects
         // ******************************************************************* OLD CODE BELOW ********************************
         // ******************************************************************* OLD CODE BELOW ********************************
 
-
-        public static float MaxObjectTrackingRange { get; } = 20000f;
-
-        public Position ForcedLocation { get; private set; }
+        public MoveToState LastMoveToState { get; set; }
 
         public Position RequestedLocation { get; set; }
 
-        public Position PreviousLocation { get; set; }
-
-
         /// <summary>
-        /// Time when this object will despawn, -1 is never.
+        /// Flag indicates if RequestedLocation should be broadcast to other players
+        /// - For AutoPos packets, this is set to TRUE
+        /// - For MoveToState packets, this is set to FALSE
         /// </summary>
-        public double DespawnTime { get; set; } = -1;
-
-        /// <summary>
-        /// tick-stamp for the server time of the last time the player moved.
-        /// TODO: implement
-        /// </summary>
-        public double LastAnimatedTicks { get; set; }
-
+        public bool RequestedLocationBroadcast { get; set; }
 
         ////// Logical Game Data
         public ContainerType ContainerType
@@ -744,18 +708,21 @@ namespace ACE.Server.WorldObjects
             EmoteManager.OnGeneration();
         }
 
-        public virtual void EnterWorld()
+        public virtual bool EnterWorld()
         {
-            if (Location != null)
-            {
-                LandblockManager.AddObject(this);
+            if (Location == null)
+                return false;
 
-                if (SuppressGenerateEffect != true)
-                    ApplyVisualEffects(PlayScript.Create);
+            if (!LandblockManager.AddObject(this))
+                return false;
 
-                if (Generator != null)
-                    OnGeneration(Generator);
-            }
+            if (SuppressGenerateEffect != true)
+                ApplyVisualEffects(PlayScript.Create);
+
+            if (Generator != null)
+                OnGeneration(Generator);
+
+            return true;
         }
 
         // todo: This should really be an extension method for Position, or a static method within Position or even AdjustPos
@@ -946,7 +913,7 @@ namespace ACE.Server.WorldObjects
             {
                 var motionInterp = PhysicsObj.get_minterp();
 
-                var rawState = new RawMotionState();
+                var rawState = new Physics.Animation.RawMotionState();
                 rawState.ForwardCommand = 0;    // always 0? must be this for monster sleep animations (skeletons, golems)
                                                 // else the monster will immediately wake back up..
                 rawState.CurrentHoldKey = HoldKey.Run;
@@ -983,6 +950,7 @@ namespace ACE.Server.WorldObjects
         public bool IsLinkSpot => WeenieType == WeenieType.Generic && WeenieClassName.Equals("portaldestination");
 
         public static readonly float LocalBroadcastRange = 96.0f;
+        public static readonly float LocalBroadcastRangeSq = LocalBroadcastRange * LocalBroadcastRange;
 
         public SetPosition ScatterPos { get; set; }
 
@@ -1015,6 +983,28 @@ namespace ACE.Server.WorldObjects
             }
         }
 
+        public virtual void HandleMotionDone(uint motionID, bool success)
+        {
+            // empty base
+        }
+
+        public virtual void OnMoveComplete(WeenieError status)
+        {
+            // empty base
+        }
+
+        public virtual void OnSticky()
+        {
+            // empty base
+        }
+
+        public virtual void OnUnsticky()
+        {
+            // empty base
+        }
+
         public virtual bool IsAttunedOrContainsAttuned => (Attuned ?? 0) >= 1;
+
+        public bool IsTradeNote => ItemType == ItemType.PromissoryNote;
     }
 }

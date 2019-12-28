@@ -20,9 +20,11 @@ namespace ACE.Server.WorldObjects
         public Server.Entity.Spell Spell;
         public ProjectileSpellType SpellType { get; set; }
 
-        public Position SpawnPos;
+        public Position SpawnPos { get; set; }
         public float DistanceToTarget { get; set; }
         public uint LifeProjectileDamage { get; set; }
+
+        public SpellProjectileInfo Info { get; set; }
 
         /// <summary>
         /// A new biota be created taking all of its values from weenie.
@@ -90,8 +92,8 @@ namespace ACE.Server.WorldObjects
             {
                 if (spellId == 3818)
                 {
-                    PhysicsObj.DefaultScript = PlayScript.Explode;
-                    PhysicsObj.DefaultScriptIntensity = 1.0f;
+                    DefaultScriptId = (uint)PlayScript.Explode;
+                    DefaultScriptIntensity = 1.0f;
                     ScriptedCollision = true;
                 }
                 else
@@ -233,6 +235,13 @@ namespace ACE.Server.WorldObjects
         public override void OnCollideEnvironment()
         {
             //Console.WriteLine($"{Name}.OnCollideEnvironment()");
+
+            if (Info != null && ProjectileSource is Player player && player.DebugSpell)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"{Name}.OnCollideEnvironment()", ChatMessageType.Broadcast));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(Info.ToString(), ChatMessageType.Broadcast));
+            }
+
             ProjectileImpact();
         }
 
@@ -241,6 +250,12 @@ namespace ACE.Server.WorldObjects
             //Console.WriteLine($"{Name}.OnCollideObject({_target.Name})");
 
             var player = ProjectileSource as Player;
+
+            if (Info != null && player != null && player.DebugSpell)
+            {
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat($"{Name}.OnCollideObject({_target?.Name} ({_target?.Guid}))", ChatMessageType.Broadcast));
+                player.Session.Network.EnqueueSend(new GameMessageSystemChat(Info.ToString(), ChatMessageType.Broadcast));
+            }
 
             if (player != null)
                 player.LastHitSpellProjectile = Spell;

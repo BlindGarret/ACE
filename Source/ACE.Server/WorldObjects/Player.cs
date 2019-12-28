@@ -39,12 +39,15 @@ namespace ACE.Server.WorldObjects
 
         public Session Session { get; }
 
-        public QuestManager QuestManager;
-
         public ContractManager ContractManager;
 
         public bool LastContact = true;
         public bool IsJumping = false;
+
+        public DateTime LastJumpTime;
+
+        public ACE.Entity.Position LastGroundPos;
+        public ACE.Entity.Position SnapPos;
 
         public ConfirmationManager ConfirmationManager;
 
@@ -110,6 +113,8 @@ namespace ACE.Server.WorldObjects
             // This should be handled automatically...
             //PositionFlags |= PositionFlags.OrientationHasNoX | PositionFlags.OrientationHasNoY | PositionFlags.IsGrounded | PositionFlags.HasPlacementID;
 
+            FirstEnterWorldDone = false;
+
             SetStance(MotionStance.NonCombat, false);
 
             // radius for object updates
@@ -139,7 +144,7 @@ namespace ACE.Server.WorldObjects
 
             CombatTable = DatManager.PortalDat.ReadFromDat<CombatManeuverTable>(CombatTableDID.Value);
 
-            QuestManager = new QuestManager(this);
+            _questManager = new QuestManager(this);
 
             ContractManager = new ContractManager(this);
 
@@ -150,6 +155,8 @@ namespace ACE.Server.WorldObjects
             SquelchManager = new SquelchManager(this);
 
             MagicState = new MagicState(this);
+
+            RecordCast = new RecordCast(this);
 
             return; // todo
 
@@ -700,6 +707,7 @@ namespace ACE.Server.WorldObjects
         public void HandleActionJump(JumpPack jump)
         {
             StartJump = new ACE.Entity.Position(Location);
+            //Console.WriteLine($"JumpPack: Velocity: {jump.Velocity}, Extent: {jump.Extent}");
 
             var strength = Strength.Current;
             var capacity = EncumbranceSystem.EncumbranceCapacity((int)strength, AugmentationIncreasedCarryingCapacity);
@@ -727,6 +735,7 @@ namespace ACE.Server.WorldObjects
             }*/
 
             IsJumping = true;
+            LastJumpTime = DateTime.UtcNow;
 
             UpdateVitalDelta(Stamina, -staminaCost);
 
@@ -749,6 +758,9 @@ namespace ACE.Server.WorldObjects
 
             // broadcast jump
             EnqueueBroadcast(new GameMessageVectorUpdate(this));
+
+            if (RecordCast.Enabled)
+                RecordCast.OnJump(jump);
         }
 
         /// <summary>

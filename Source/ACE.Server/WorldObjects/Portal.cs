@@ -1,4 +1,6 @@
-using System;
+using System.Numerics;
+
+using log4net;
 
 using ACE.Database.Models.Shard;
 using ACE.Database.Models.World;
@@ -15,6 +17,8 @@ namespace ACE.Server.WorldObjects
 {
     public partial class Portal : WorldObject
     {
+        private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
         /// <summary>
         /// A new biota be created taking all of its values from weenie.
         /// </summary>
@@ -36,6 +40,29 @@ namespace ACE.Server.WorldObjects
             ObjectDescriptionFlags |= ObjectDescriptionFlag.Portal;
 
             UpdatePortalDestination(Destination);
+        }
+
+        public override bool EnterWorld()
+        {
+            var success = base.EnterWorld();
+
+            if (!success)
+            {
+                log.Error($"{Name} ({Guid}) failed to spawn @ {Location?.ToLOCString()}");
+                return false;
+            }
+
+            if (RelativeDestination != null && Location != null && Destination == null)
+            {
+                var relativeDestination = new Position(Location);
+                relativeDestination.Pos += new Vector3(RelativeDestination.PositionX, RelativeDestination.PositionY, RelativeDestination.PositionZ);
+                relativeDestination.Rotation = new Quaternion(RelativeDestination.RotationX, relativeDestination.RotationY, relativeDestination.RotationZ, relativeDestination.RotationW);
+                relativeDestination.LandblockId = new LandblockId(relativeDestination.GetCell());
+
+                UpdatePortalDestination(relativeDestination);
+            }
+
+            return true;
         }
 
         public void UpdatePortalDestination(Position destination)
