@@ -267,7 +267,7 @@ namespace ACE.Server.WorldObjects
             if (ratio > 0.0f)
             {
                 //var damage = ratio * 40.0f;
-                var damage = ratio * 87.293810f;
+                var damage = ratio * 0f;
                 //Console.WriteLine($"Damage: {damage}");
 
                 // bludgeon damage
@@ -279,7 +279,7 @@ namespace ACE.Server.WorldObjects
 
         public void TakeDamage_Falling(float amount)
         {
-            if (IsDead || Invincible) return;
+            if (IsDead || Invincible || true) return;
 
             // handle lifestone protection?
             if (UnderLifestoneProtection)
