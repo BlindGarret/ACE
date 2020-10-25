@@ -131,7 +131,7 @@ namespace ACE.Server.WorldObjects
                 var creature = obj.WeenieObj.WorldObject as Creature;
                 if (creature == null || creature.Teleporting || creature.IsDead) continue;
 
-                if (player != null && creature is Player && player.CheckPKStatusVsTarget(player, creature, null) != null)
+                if (player != null && player.CheckPKStatusVsTarget(creature, null) != null)
                     continue;
 
                 if (!creature.Attackable || creature.Teleporting)
@@ -156,6 +156,33 @@ namespace ACE.Server.WorldObjects
                     break;
             }
             return cleaveTargets;
+        }
+
+        public bool IsCleaveable(Creature creature)
+        {
+            if (creature == null || !creature.Attackable || creature.Teleporting || creature.IsDead)
+                return false;
+
+            var player = this as Player;
+
+            if (player != null && player.CheckPKStatusVsTarget(creature, null) != null)
+                return false;
+
+            if (creature is CombatPet && (player != null || this is CombatPet))
+                return false;
+
+            // no objects in cleave range
+            var distSquared = Location.SquaredDistanceTo(creature.Location);
+            if (distSquared > CleaveRangeSq)
+                return false;
+
+            // only cleave in front of attacker
+            var angle = GetAngle(creature);
+            if (Math.Abs(angle) > CleaveAngle / 2.0f)
+                return false;
+
+            // found cleavable object
+            return true;
         }
     }
 }

@@ -249,12 +249,6 @@ namespace ACE.Server.Managers
         {
             var questName = GetQuestName(questFormat);
 
-            // Always return false for Kill Task count quests,
-            // as their emote logic is backwards from standard quests, and
-            // they should always be solvable, once flagged with main kill task quest
-            if (questName.EndsWith("count", StringComparison.Ordinal) || questName.EndsWith("counter", StringComparison.Ordinal))
-                return false;
-
             // verify max solves / quest timer
             var nextSolveTime = GetNextSolveTime(questName);
 
@@ -281,12 +275,39 @@ namespace ACE.Server.Managers
         /// <summary>
         /// Returns the maximum # of solves for this quest
         /// </summary>
-        public int GetMaxSolves(string questName)
+        public int GetMaxSolves(string questFormat)
         {
+            var questName = GetQuestName(questFormat);
+
             var quest = DatabaseManager.World.GetCachedQuest(questName);
             if (quest == null) return 0;
 
             return quest.MaxSolves;
+        }
+
+        /// <summary>
+        /// Returns the current # of solves for this quest
+        /// </summary>
+        public int GetCurrentSolves(string questFormat)
+        {
+            var questName = GetQuestName(questFormat);
+
+            var quest = GetQuest(questName);
+            if (quest == null) return 0;
+
+            return quest.NumTimesCompleted;
+        }
+
+        /// <summary>
+        /// Some quests we do not want to scale MinDelta if "quest_mindelta_rate" has been set.
+        /// They may be things that are races against time, like Colo
+        /// </summary>
+        public static bool CanScaleQuestMinDelta(Database.Models.World.Quest quest)
+        {
+            if (quest.Name.StartsWith("ColoArena"))
+                return false;
+
+            return true;
         }
 
         /// <summary>
@@ -308,7 +329,12 @@ namespace ACE.Server.Managers
                 return TimeSpan.MaxValue;   // cannot solve this quest again - max solves reached / exceeded
 
             var currentTime = (uint)Time.GetUnixTime();
-            var nextSolveTime = playerQuest.LastTimeCompleted + (uint)(quest.MinDelta * PropertyManager.GetDouble("quest_mindelta_rate", 1).Item);
+            uint nextSolveTime;
+
+            if (CanScaleQuestMinDelta(quest))
+                nextSolveTime = playerQuest.LastTimeCompleted + (uint)(quest.MinDelta * PropertyManager.GetDouble("quest_mindelta_rate", 1).Item);
+            else
+                nextSolveTime = playerQuest.LastTimeCompleted + quest.MinDelta;
 
             if (currentTime >= nextSolveTime)
                 return TimeSpan.MinValue;   // can solve again now - next solve time expired
@@ -320,16 +346,16 @@ namespace ACE.Server.Managers
         /// <summary>
         /// Increment the number of times completed for a quest
         /// </summary>
-        public void Increment(string questName)
+        public void Increment(string questName, int amount = 1)
         {
-            // kill task / append # to quest name?
-            Update(questName);
+            for (var i = 0; i < amount; i++)
+                Update(questName);
         }
 
         /// <summary>
         /// Decrement the number of times completed for a quest
         /// </summary>
-        public void Decrement(string quest)
+        public void Decrement(string quest, int amount = 1)
         {
             var questName = GetQuestName(quest);
 
@@ -337,15 +363,15 @@ namespace ACE.Server.Managers
 
             if (existing != null)
             {
-                if (existing.NumTimesCompleted == 0)
-                {
-                    if (Debug) Console.WriteLine($"{Name}.QuestManager.Decrement({quest}): can not Decrement existing quest. {questName}.NumTimesCompleted is already 0.");
-                    return;
-                }
+                //if (existing.NumTimesCompleted == 0)
+                //{
+                //    if (Debug) Console.WriteLine($"{Name}.QuestManager.Decrement({quest}): can not Decrement existing quest. {questName}.NumTimesCompleted is already 0.");
+                //    return;
+                //}
 
                 // update existing quest
                 existing.LastTimeCompleted = (uint)Time.GetUnixTime();
-                existing.NumTimesCompleted--;
+                existing.NumTimesCompleted -= amount;
 
                 if (Debug) Console.WriteLine($"{Name}.QuestManager.Decrement({quest}): updated quest ({existing.NumTimesCompleted})");
 
@@ -419,7 +445,6 @@ namespace ACE.Server.Managers
                 Console.WriteLine("Quest Name: " + quest.QuestName);
                 Console.WriteLine("Times Completed: " + quest.NumTimesCompleted);
                 Console.WriteLine("Last Time Completed: " + quest.LastTimeCompleted);
-                Console.WriteLine("Quest ID: " + quest.Id.ToString("X8"));
                 Console.WriteLine("Player ID: " + quest.CharacterId.ToString("X8"));
                 Console.WriteLine("----");
             }
@@ -455,8 +480,8 @@ namespace ACE.Server.Managers
             var quest = GetQuest(questName);
             var numSolves = quest != null ? quest.NumTimesCompleted : 0;
 
-            int min = _min ?? 0;    // use defaults?
-            int max = _max ?? 0;
+            int min = _min ?? int.MinValue;    // use defaults?
+            int max = _max ?? int.MaxValue;
 
             var hasQuestSolves = numSolves >= min && numSolves <= max;    // verify: can either of these be -1?
             if (Debug)
@@ -474,14 +499,25 @@ namespace ACE.Server.Managers
 
             if (player == null) return;
 
-            if (wo is Portal)
+            var error = new GameEventInventoryServerSaveFailed(player.Session, wo.Guid.Full, WeenieError.ItemRequiresQuestToBePickedUp);
+            player.Session.Network.EnqueueSend(error);
+        }
+
+        public void HandlePortalQuestError(string questName)
+        {
+            var player = Creature as Player;
+
+            if (player == null) return;
+
+            if (!HasQuest(questName))
             {
                 player.Session.Network.EnqueueSend(new GameEventWeenieError(player.Session, WeenieError.YouMustCompleteQuestToUsePortal));
             }
-            else
+            else if (CanSolve(questName))
             {
-                var error = new GameEventInventoryServerSaveFailed(player.Session, wo.Guid.Full, WeenieError.ItemRequiresQuestToBePickedUp);
-                player.Session.Network.EnqueueSend(error);
+                var error = new GameEventWeenieError(player.Session, WeenieError.QuestSolvedTooLongAgo);
+                var text = new GameMessageSystemChat("You completed the quest this portal requires too long ago!", ChatMessageType.Magic); // This msg wasn't sent in retail PCAP, leading to a completely silent fail when using the portal with an expired flag.
+                player.Session.Network.EnqueueSend(text, error);
             }
         }
 
@@ -511,67 +547,110 @@ namespace ACE.Server.Managers
         }
 
         /// <summary>
-        /// Increments the counter for a kill task, and optionally shares with fellowship
+        /// Increments the counter for a kill task for a player
         /// </summary>
-        public void HandleKillTask(string _questName, WorldObject obj, bool shareable = true)
+        public void HandleKillTask(string killQuestName, WorldObject killedCreature)
         {
             var player = Creature as Player;
             if (player == null) return;
 
             // http://acpedia.org/wiki/Announcements_-_2012/12_-_A_Growing_Twilight#Release_Notes
 
-            if (HasQuest(_questName))
+            if (killedCreature == null)
             {
-                Stamp(_questName);
-
-                var questName = GetQuestName(_questName);
-                var quest = DatabaseManager.World.GetCachedQuest(questName);
-
-                if (quest == null)
-                {
-                    log.Error($"{Name}.QuestManager.HandleKillTask({_questName}): couldn't find kill task {questName} in database");
-                    return;
-                }
-
-                var playerQuest = Quests.FirstOrDefault(q => q.QuestName.Equals(questName, StringComparison.OrdinalIgnoreCase));
-
-                if (playerQuest == null)
-                {
-                    log.Error($"{Name}.QuestManager.HandleKillTask({_questName}): couldn't find kill task {questName} in player quests");
-                    return;
-                }
-
-                if (obj == null)
-                {
-                    log.Error($"{Name}.QuestManager.HandleKillTask({_questName}): input object is null!");
-                    return;
-                }
-
-                var msg = "";
-
-                if (IsMaxSolves(questName))
-                    msg = $"You have killed {quest.MaxSolves} {obj.GetPluralName()}. Your task is complete!";
-                else
-                    msg = $"You have killed {playerQuest.NumTimesCompleted} {obj.GetPluralName()}. You must kill {quest.MaxSolves} to complete your task!";
-
-                player.Session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.Broadcast));
-            }
-            else if (PropertyManager.GetBool("fellow_kt_killer").Item)
-            {
-                // if this option is enabled (retail default), the killer is required to have kill task
-                // for it to share with fellowship
+                log.Error($"{Name}.QuestManager.HandleKillTask({killQuestName}): input object is null!");
                 return;
             }
 
-            // is player in fellowship?
-            if (player.Fellowship != null && shareable)
-            {
-                // if so, share with fellows within range
-                var fellows = player.Fellowship.WithinRange(player);
+            var questName = GetQuestName(killQuestName);
+            var quest = DatabaseManager.World.GetCachedQuest(questName);
 
-                foreach (var fellow in fellows)
-                    fellow.QuestManager.HandleKillTask(_questName, obj, false);
+            if (quest == null)
+            {
+                log.Error($"{Name}.QuestManager.HandleKillTask({killQuestName}): couldn't find kill task {questName} in database");
+                return;
             }
+
+            if (!HasQuest(questName))
+                return;
+
+            Stamp(killQuestName);
+
+            var playerQuest = Quests.FirstOrDefault(q => q.QuestName.Equals(questName, StringComparison.OrdinalIgnoreCase));
+
+            if (playerQuest == null)
+            {
+                // this should be impossible
+                log.Error($"{Name}.QuestManager.HandleKillTask({killQuestName}): couldn't find kill task {questName} in player quests");
+                return;
+            }
+
+            var msg = $"You have killed {playerQuest.NumTimesCompleted} {killedCreature.GetPluralName()}!";
+
+            if (IsMaxSolves(questName))
+                msg += $" Your task is complete!";
+            else
+                msg += $" You must kill {quest.MaxSolves} to complete your task.";
+
+            player.Session.Network.EnqueueSend(new GameMessageSystemChat(msg, ChatMessageType.Broadcast));
+        }
+
+        /// <summary>
+        /// Called when a player kills Creature
+        /// </summary>
+        public void OnDeath(WorldObject killer)
+        {
+        }
+
+        public bool HasQuestBits(string questFormat, int bits)
+        {
+            var questName = GetQuestName(questFormat);
+
+            var quest = GetQuest(questName);
+            if (quest == null) return false;
+
+            var hasQuestBits = (quest.NumTimesCompleted & bits) == bits;
+
+            if (Debug)
+                Console.WriteLine($"{Name}.QuestManager.HasQuestBits({questFormat}, 0x{bits:X}): {hasQuestBits}");
+
+            return hasQuestBits;
+        }
+
+        public bool HasNoQuestBits(string questFormat, int bits)
+        {
+            var questName = GetQuestName(questFormat);
+
+            var quest = GetQuest(questName);
+            if (quest == null) return true;
+
+            var hasNoQuestBits = (quest.NumTimesCompleted & bits) == 0;
+
+            if (Debug)
+                Console.WriteLine($"{Name}.QuestManager.HasNoQuestBits({questFormat}, 0x{bits:X}): {hasNoQuestBits}");
+
+            return hasNoQuestBits;
+        }
+
+        public void SetQuestBits(string questFormat, int bits, bool on = true)
+        {
+            var questName = GetQuestName(questFormat);
+
+            var quest = GetQuest(questName);
+
+            var questBits = 0;
+
+            if (quest != null) questBits = quest.NumTimesCompleted;
+
+            if (on)
+                questBits |= bits;
+            else
+                questBits &= ~bits;
+
+            if (Debug)
+                Console.WriteLine($"{Name}.QuestManager.SetQuestBits({questFormat}, 0x{bits:X}): {on}");
+
+            SetQuestCompletions(questFormat, questBits);
         }
     }
 }

@@ -68,6 +68,8 @@ namespace ACE.Server.Physics.Common
 
         public void PostInit()
         {
+            init_landcell();
+
             init_buildings();
             init_static_objs();
         }
@@ -502,6 +504,20 @@ namespace ACE.Server.Physics.Common
                     obj.add_obj_to_cell(cell, position.Frame);
                     add_static_object(obj);
                 }
+
+                if (Info.RestrictionTables != null)
+                {
+                    foreach (var kvp in Info.RestrictionTables)
+                    {
+                        var lcoord = LandDefs.gid_to_lcoord(kvp.Key);
+
+                        if (lcoord == null) continue;
+
+                        var idx = ((int)lcoord.Value.Y & 7) + ((int)lcoord.Value.X & 7) * SideCellCount;
+
+                        LandCells[idx].RestrictionObj = kvp.Value;
+                    }
+                }
             }
             if (UseSceneFiles)
                 get_land_scenes();
@@ -544,7 +560,8 @@ namespace ACE.Server.Physics.Common
         private bool? isDungeon;
 
         /// <summary>
-        /// Returns TRUE if this landblock is a dungeon
+        /// Returns TRUE if this landblock is a dungeon,
+        /// with no traversable overworld
         /// </summary>
         public bool IsDungeon
         {
@@ -558,16 +575,40 @@ namespace ACE.Server.Physics.Common
                 // - all heights being 0
                 // - having at least 1 EnvCell (0x100+)
                 // - contains no buildings
-                /*foreach (var height in Height)
+                foreach (var height in Height)
                 {
                     if (height != 0)
                     {
                         isDungeon = false;
                         return isDungeon.Value;
                     }
-                }*/
+                }
                 isDungeon = Info != null && Info.NumCells > 0 && Info.Buildings != null && Info.Buildings.Count == 0;
                 return isDungeon.Value;
+            }
+        }
+
+        private bool? hasDungeon;
+
+        /// <summary>
+        /// Returns TRUE if this landblock contains a dungeon
+        //
+        /// If a landblock contains both a dungeon + traversable overworld,
+        /// this field will return TRUE, whereas IsDungeon will return FALSE
+        /// 
+        /// This property should only be used in very specific scenarios,
+        /// such as determining if a landblock contains a mansion basement
+        /// </summary>
+        public bool HasDungeon
+        {
+            get
+            {
+                // return cached value
+                if (hasDungeon != null)
+                    return hasDungeon.Value;
+
+                hasDungeon = Info != null && Info.NumCells > 0 && Info.Buildings != null && Info.Buildings.Count == 0;
+                return hasDungeon.Value;
             }
         }
 

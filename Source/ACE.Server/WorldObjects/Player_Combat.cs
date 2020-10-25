@@ -29,20 +29,9 @@ namespace ACE.Server.WorldObjects
     /// </summary>
     partial class Player
     {
-        public enum DebugDamageType
-        {
-            None     = 0x0,
-            Attacker = 0x1,
-            Defender = 0x2,
-            All      = Attacker | Defender
-        };
-
-        public DebugDamageType DebugDamage;
-
-        public ObjectGuid DebugDamageTarget;
-
         public int AttackSequence;
         public bool Attacking;
+        public bool AttackCancelled;
 
         public DateTime NextRefillTime;
 
@@ -76,27 +65,23 @@ namespace ACE.Server.WorldObjects
         {
             var weapon = GetEquippedWeapon();
 
-            // missile weapon
-            if (weapon != null && weapon.CurrentWieldedLocation == EquipMask.MissileWeapon)
-                return GetCreatureSkill(Skill.MissileWeapons).Skill;
+            if (weapon?.WeaponSkill == null)
+                return GetHighestMeleeSkill();
 
-            if (weapon != null && weapon.WeaponSkill == Skill.TwoHandedCombat)
-                return Skill.TwoHandedCombat;
-
-            // hack for converting pre-MoA skills
-            var maxMelee = GetCreatureSkill(GetHighestMeleeSkill());
+            var skill = ConvertToMoASkill(weapon.WeaponSkill);
 
             // DualWieldAlternate will be TRUE if *next* attack is offhand
             if (IsDualWieldAttack && !DualWieldAlternate)
             {
+                var weaponSkill = GetCreatureSkill(skill);
                 var dualWield = GetCreatureSkill(Skill.DualWield);
 
                 // offhand attacks use the lower skill level between dual wield and weapon skill
-                if (dualWield.Current < maxMelee.Current)
-                    return dualWield.Skill;
+                if (dualWield.Current < weaponSkill.Current)
+                    skill = Skill.DualWield;
             }
-
-            return maxMelee.Skill;
+            //Console.WriteLine($"{Name}.GetCurrentWeaponSkill - {skill}");
+            return skill;
         }
 
         /// <summary>
@@ -120,6 +105,7 @@ namespace ACE.Server.WorldObjects
 
         public override CombatType GetCombatType()
         {
+            // this is an unsafe function, move away from this
             var weapon = GetEquippedWeapon();
 
             if (weapon == null || weapon.CurrentWieldedLocation != EquipMask.MissileWeapon)
@@ -133,17 +119,16 @@ namespace ACE.Server.WorldObjects
             if (target.Health.Current <= 0)
                 return null;
 
-            // check PK status
             var targetPlayer = target as Player;
-            if (targetPlayer != null)
+
+            // check PK status
+            var pkError = CheckPKStatusVsTarget(target, null);
+            if (pkError != null)
             {
-                var pkError = CheckPKStatusVsTarget(this, targetPlayer, null);
-                if (pkError != null)
-                {
-                    Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(Session, pkError[0], target.Name));
+                Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(Session, pkError[0], target.Name));
+                if (targetPlayer != null)
                     targetPlayer.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(targetPlayer.Session, pkError[1], Name));
-                    return null;
-                }
+                return null;
             }
 
             var damageEvent = DamageEvent.CalculateDamage(this, target, damageSource);
@@ -193,10 +178,12 @@ namespace ACE.Server.WorldObjects
                 // handle Dirty Fighting
                 if (GetCreatureSkill(Skill.DirtyFighting).AdvancementClass >= SkillAdvancementClass.Trained)
                     FightDirty(target);
-            }
+                
+                target.EmoteManager.OnDamage(this);
 
-            if (damageEvent.Damage > 0.0f)
-                Session.Network.EnqueueSend(new GameEventUpdateHealth(Session, target.Guid.Full, (float)target.Health.Current / target.Health.MaxValue));
+                if (damageEvent.IsCritical)
+                    target.EmoteManager.OnReceiveCritical(this);
+            }
 
             if (targetPlayer == null)
                 OnAttackMonster(target);
@@ -209,9 +196,6 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override void OnDamageTarget(WorldObject target, CombatType attackType, bool critical)
         {
-            if (critical)
-                target.EmoteManager.OnReceiveCritical(this);
-
             var attackSkill = GetCreatureSkill(GetCurrentWeaponSkill());
             var difficulty = GetTargetEffectiveDefenseSkill(target);
 
@@ -255,6 +239,38 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Returns a modifier to the player's defense skill, based on current motion state
+        /// </summary>
+        /// <returns></returns>
+        public float GetDefenseStanceMod()
+        {
+            if (IsJumping)
+                return 0.5f;
+
+            if (IsLoggingOut)
+                return 0.8f;
+
+            if (CombatMode != CombatMode.NonCombat)
+                return 1.0f;
+
+            var forwardCommand = CurrentMovementData.MovementType == MovementType.Invalid && CurrentMovementData.Invalid != null ?
+                CurrentMovementData.Invalid.State.ForwardCommand : MotionCommand.Invalid;
+
+            switch (forwardCommand)
+            {
+                // TODO: verify multipliers
+                case MotionCommand.Crouch:
+                    return 0.4f;
+                case MotionCommand.Sitting:
+                    return 0.3f;
+                case MotionCommand.Sleeping:
+                    return 0.2f;
+                default:
+                    return 1.0f;
+            }
+        }
+
+        /// <summary>
         /// Called when player successfully avoids an attack
         /// </summary>
         public override void OnEvade(WorldObject attacker, CombatType attackType)
@@ -276,19 +292,34 @@ namespace ACE.Server.WorldObjects
             {
                 if (defenseSkill.AdvancementClass >= SkillAdvancementClass.Trained)
                 {
-                    var enduranceBase = Endurance.Base;
+                    var enduranceBase = (int)Endurance.Base;
+
                     // TODO: find exact formula / where it caps out at 75%
-                    var enduranceCap = 400;
-                    var effective = Math.Min(enduranceBase, enduranceCap);
-                    var noStaminaUseChance = effective / enduranceCap * 0.75f;
-                    if (noStaminaUseChance < ThreadSafeRandom.Next(0.0f, 1.0f))
+
+                    // more literal / linear formula
+                    //var noStaminaUseChance = (enduranceBase - 50) / 320.0f;
+
+                    // gdle curve-based formula, caps at 300 instead of 290
+                    var noStaminaUseChance = (enduranceBase * enduranceBase * 0.000005f) + (enduranceBase * 0.00124f) - 0.07f;
+
+                    noStaminaUseChance = Math.Clamp(noStaminaUseChance, 0.0f, 0.75f);
+
+                    //Console.WriteLine($"NoStaminaUseChance: {noStaminaUseChance}");
+
+                    if (noStaminaUseChance <= ThreadSafeRandom.Next(0.0f, 1.0f))
                         UpdateVitalDelta(Stamina, -1);
                 }
                 else
                     UpdateVitalDelta(Stamina, -1);
             }
             else
-                UpdateVitalDelta(Stamina, -1);
+            {
+                // if the player is in non-combat mode, no stamina is consumed on evade
+                // reference: https://youtu.be/uFoQVgmSggo?t=145
+                // from the dm guide, page 147: "if you are not in Combat mode, you lose no Stamina when an attack is thrown at you"
+
+                //UpdateVitalDelta(Stamina, -1);
+            }
 
             if (!SquelchManager.Squelches.Contains(attacker, ChatMessageType.CombatEnemy))
                 Session.Network.EnqueueSend(new GameEventEvasionDefenderNotification(Session, attacker.Name));
@@ -377,7 +408,7 @@ namespace ACE.Server.WorldObjects
             var damageTaken = (uint)-UpdateVitalDelta(Health, (int)-amount);
 
             // update stamina
-            UpdateVitalDelta(Stamina, -1);
+            //UpdateVitalDelta(Stamina, -1);
 
             //if (Fellowship != null)
                 //Fellowship.OnVitalUpdate(this);
@@ -434,12 +465,31 @@ namespace ACE.Server.WorldObjects
             var amount = (uint)Math.Round(_amount);
             var percent = (float)amount / Health.MaxValue;
 
+            var equippedCloak = EquippedCloak;
+
+            if (equippedCloak != null && Cloak.HasDamageProc(equippedCloak) && Cloak.RollProc(equippedCloak, percent))
+            {
+                var reducedAmount = Cloak.GetReducedAmount(source, amount);
+
+                Cloak.ShowMessage(this, source, amount, reducedAmount);
+
+                amount = reducedAmount;
+                percent = (float)amount / Health.MaxValue;
+            }
+
             // update health
             var damageTaken = (uint)-UpdateVitalDelta(Health, (int)-amount);
             DamageHistory.Add(source, damageType, damageTaken);
 
             // update stamina
-            UpdateVitalDelta(Stamina, -1);
+            if (CombatMode != CombatMode.NonCombat)
+            {
+                // if the player is in non-combat mode, no stamina is consumed on evade
+                // reference: https://youtu.be/uFoQVgmSggo?t=145
+                // from the dm guide, page 147: "if you are not in Combat mode, you lose no Stamina when an attack is thrown at you"
+
+                UpdateVitalDelta(Stamina, -1);
+            }
 
             //if (Fellowship != null)
                 //Fellowship.OnVitalUpdate(this);
@@ -470,7 +520,24 @@ namespace ACE.Server.WorldObjects
             }
 
             if (percent >= 0.1f)
-                EnqueueBroadcast(new GameMessageSound(Guid, Sound.Wound1, 1.0f));
+            {
+                // Wound1 - Aahhh!    - elemental attacks above some threshold
+                // Wound2 - Deep Ugh! - bludgeoning attacks above some threshold
+                // Wound3 - Ooh!      - slashing / piercing / undef attacks above some threshold
+
+                var woundSound = Sound.Wound3;
+
+                if (damageType == DamageType.Bludgeon)
+                    woundSound = Sound.Wound2;
+
+                else if ((damageType & DamageType.Elemental) != 0)
+                    woundSound = Sound.Wound1;
+
+                EnqueueBroadcast(new GameMessageSound(Guid, woundSound, 1.0f));
+            }
+
+            if (equippedCloak != null && Cloak.HasProcSpell(equippedCloak))
+                Cloak.TryProcSpell(this, source, equippedCloak, percent);
 
             // if player attacker, update PK timer
             if (source is Player attacker)
@@ -492,24 +559,31 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public int GetHeldItemBurden()
         {
-            // get main hand item
-            var weapon = GetEquippedWeapon();
+            var mainhand = GetEquippedMainHand();
+            var offhand = GetEquippedOffHand();
 
-            // get off-hand item
-            var shield = GetEquippedShield();
+            var mainhandBurden = mainhand?.EncumbranceVal ?? 0;
+            var offhandBurden = offhand?.EncumbranceVal ?? 0;
 
-            var weaponBurden = weapon != null ? (weapon.EncumbranceVal ?? 0) : 0;
-            var shieldBurden = shield != null ? (shield.EncumbranceVal ?? 0) : 0;
-
-            return weaponBurden + shieldBurden;
+            return mainhandBurden + offhandBurden;
         }
 
         public float GetStaminaMod()
         {
-            var endurance = Endurance.Base;
+            var endurance = (int)Endurance.Base;
 
-            var staminaMod = 1.0f - (endurance - 100.0f) / 600.0f;   // guesstimated formula: 50% reduction at 400 base endurance
+            // more literal / linear formula
+            var staminaMod = 1.0f - (endurance - 50) / 480.0f;
+
+            // gdle curve-based formula, caps at 300 instead of 290
+            //var staminaMod = (endurance * endurance * -0.000003175f) - (endurance * 0.0008889f) + 1.052f;
+
             staminaMod = Math.Clamp(staminaMod, 0.5f, 1.0f);
+
+            // this is also specific to gdle,
+            // additive luck which can send the base stamina way over 1.0
+            /*var luck = ThreadSafeRandom.Next(0.0f, 1.0f);
+            staminaMod += luck;*/
 
             return staminaMod;
         }
@@ -626,20 +700,31 @@ namespace ACE.Server.WorldObjects
             return PlayerKillerStatus.HasFlag(PlayerKillerStatus.PKLite) && new ObjectGuid(killerGuid ?? 0).IsPlayer() && killerGuid != Guid.Full;
         }
 
+        public CombatMode LastCombatMode;
+
+        public static readonly float UseTimeEpsilon = 0.05f;
+
         /// <summary>
         /// This method processes the Game Action (F7B1) Change Combat Mode (0x0053)
         /// </summary>
         public void HandleActionChangeCombatMode(CombatMode newCombatMode)
         {
-            if (DateTime.UtcNow >= NextUseTime)
+            //log.Info($"{Name}.HandleActionChangeCombatMode({newCombatMode})");
+
+            LastCombatMode = newCombatMode;
+            
+            if (DateTime.UtcNow >= NextUseTime.AddSeconds(UseTimeEpsilon))
                 HandleActionChangeCombatMode_Inner(newCombatMode);
             else
             {
                 var actionChain = new ActionChain();
-                actionChain.AddDelaySeconds((NextUseTime - DateTime.UtcNow).TotalSeconds);
+                actionChain.AddDelaySeconds((NextUseTime - DateTime.UtcNow).TotalSeconds + UseTimeEpsilon);
                 actionChain.AddAction(this, () => HandleActionChangeCombatMode_Inner(newCombatMode));
                 actionChain.EnqueueChain();
             }
+
+            if (IsAfk)
+                HandleActionSetAFKMode(false);
         }
 
         public void HandleActionChangeCombatMode_Inner(CombatMode newCombatMode)
@@ -648,6 +733,11 @@ namespace ACE.Server.WorldObjects
 
             var missileWeapon = GetEquippedMissileWeapon();
             var caster = GetEquippedWand();
+
+            if (CombatMode == CombatMode.Magic && MagicState.IsCasting)
+                FailCast();
+
+            float animTime = 0.0f, queueTime = 0.0f;
 
             switch (newCombatMode)
             {
@@ -689,13 +779,18 @@ namespace ACE.Server.WorldObjects
                                     var equippedAmmo = GetEquippedAmmo();
                                     if (equippedAmmo == null)
                                     {
-                                        var animTime = SetCombatMode(newCombatMode);
-                                        Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You are out of ammunition!"));
+                                        animTime = SetCombatMode(newCombatMode, out queueTime);
 
                                         var actionChain = new ActionChain();
                                         actionChain.AddDelaySeconds(animTime);
-                                        actionChain.AddAction(this, () => SetCombatMode(CombatMode.NonCombat));
+                                        actionChain.AddAction(this, () =>
+                                        {
+                                            Session.Network.EnqueueSend(new GameEventCommunicationTransientString(Session, "You are out of ammunition!"));
+                                            SetCombatMode(CombatMode.NonCombat);
+                                        });
                                         actionChain.EnqueueChain();
+
+                                        NextUseTime = DateTime.UtcNow.AddSeconds(animTime);
                                         return;
                                     }
                                     else
@@ -719,24 +814,18 @@ namespace ACE.Server.WorldObjects
                     break;
 
             }
-            SetCombatMode(newCombatMode);
+            animTime = SetCombatMode(newCombatMode, out queueTime);
+            //log.Info($"{Name}.HandleActionChangeCombatMode_Inner({newCombatMode}) - animTime: {animTime}, queueTime: {queueTime}");
 
-            if (RecordCast.Enabled)
+            NextUseTime = DateTime.UtcNow.AddSeconds(animTime);
+
+            if (MagicState.IsCasting && RecordCast.Enabled)
                 RecordCast.OnSetCombatMode(newCombatMode);
-        }
-
-        /// <summary>
-        /// Returns the current attack maneuver for a player
-        /// </summary>
-        public override AttackType GetAttackType(WorldObject weapon, CombatManeuver combatManuever)
-        {
-            // should probably come from combat maneuvers table, even for players
-            return GetWeaponAttackType(weapon);
         }
 
         public override bool CanDamage(Creature target)
         {
-            return true;    // handled elsewhere
+            return target.Attackable && !target.Teleporting && !(target is CombatPet);
         }
 
         // http://acpedia.org/wiki/Announcements_-_2002/04_-_Betrayal
@@ -765,8 +854,13 @@ namespace ACE.Server.WorldObjects
         // - These abilities are player-only, creatures with high endurance will not benefit from any of these changes.
         // - Come May, you can type @help endurance for a summary of the April changes to Endurance.
 
-        public override float GetNaturalResistance()
+        public override float GetNaturalResistance(DamageType damageType)
         {
+            // http://acpedia.org/wiki/Announcements_-_11th_Anniversary_Preview#Void_Magic_and_You.21
+            // Creatures under Asheron’s protection take half damage from any nether type spell.
+            if (damageType == DamageType.Nether)
+                return 0.5f;
+
             // base strength and endurance give the player a natural resistance to damage,
             // which caps at 50% (equivalent to level 5 life prots)
             // these do not stack with life protection spells
@@ -968,11 +1062,75 @@ namespace ACE.Server.WorldObjects
                     return DamageType.Slash;
             }
 
-            return damageType.SelectDamageType();
+            var powerLevel = combatType == CombatType.Melee ? (float?)PowerLevel : null;
+
+            return damageType.SelectDamageType(powerLevel);
         }
 
         public WorldObject HandArmor => EquippedObjects.Values.FirstOrDefault(i => (i.ClothingPriority & CoverageMask.Hands) > 0);
 
         public WorldObject FootArmor => EquippedObjects.Values.FirstOrDefault(i => (i.ClothingPriority & CoverageMask.Feet) > 0);
+
+
+        /// <summary>
+        /// Determines if player can damage a target via PlayerKillerStatus
+        /// </summary>
+        /// <returns>null if no errors, else pk error list</returns>
+        public override List<WeenieErrorWithString> CheckPKStatusVsTarget(WorldObject target, Spell spell)
+        {
+            if (target == null ||target == this)
+                return null;
+
+            var targetCreature = target as Creature;
+            if (targetCreature == null && target.WielderId != null)
+            {
+                // handle casting item spells
+                targetCreature = CurrentLandblock.GetObject(target.WielderId.Value) as Creature;
+            }
+            if (targetCreature == null)
+                return null;
+
+            if (PlayerKillerStatus == PlayerKillerStatus.Free || targetCreature.PlayerKillerStatus == PlayerKillerStatus.Free)
+                return null;
+
+            var targetPlayer = target as Player;
+
+            if (targetPlayer != null)
+            {
+                if (spell == null || spell.IsHarmful)
+                {
+                    // Ensure that a non-PK cannot cast harmful spells on another player
+                    if (PlayerKillerStatus == PlayerKillerStatus.NPK)
+                        return new List<WeenieErrorWithString>() { WeenieErrorWithString.YouFailToAffect_YouAreNotPK, WeenieErrorWithString._FailsToAffectYou_TheyAreNotPK };
+
+                    if (targetPlayer.PlayerKillerStatus == PlayerKillerStatus.NPK)
+                        return new List<WeenieErrorWithString>() { WeenieErrorWithString.YouFailToAffect_TheyAreNotPK, WeenieErrorWithString._FailsToAffectYou_YouAreNotPK };
+
+                    // Ensure not attacking across housing boundary
+                    if (!CheckHouseRestrictions(targetPlayer))
+                        return new List<WeenieErrorWithString>() { WeenieErrorWithString.YouFailToAffect_AcrossHouseBoundary, WeenieErrorWithString._FailsToAffectYouAcrossHouseBoundary };
+                }
+
+                // additional checks for different PKTypes
+                if (PlayerKillerStatus != targetPlayer.PlayerKillerStatus)
+                {
+                    // require same pk status, unless beneficial spell being cast on NPK
+                    // https://asheron.fandom.com/wiki/Player_Killer
+                    // https://asheron.fandom.com/wiki/Player_Killer_Lite
+
+                    if (spell == null || spell.IsHarmful || targetPlayer.PlayerKillerStatus != PlayerKillerStatus.NPK)
+                        return new List<WeenieErrorWithString>() { WeenieErrorWithString.YouFailToAffect_NotSamePKType, WeenieErrorWithString._FailsToAffectYou_NotSamePKType };
+                }
+            }
+            else
+            {
+                // if monster has a non-default pk status, ensure pk types match up
+                if (targetCreature.PlayerKillerStatus != PlayerKillerStatus.NPK && PlayerKillerStatus != targetCreature.PlayerKillerStatus)
+                {
+                    return new List<WeenieErrorWithString>() { WeenieErrorWithString.YouFailToAffect_NotSamePKType, WeenieErrorWithString._FailsToAffectYou_NotSamePKType };
+                }
+            }
+            return null;
+        }
     }
 }

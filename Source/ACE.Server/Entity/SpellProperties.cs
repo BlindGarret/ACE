@@ -99,6 +99,14 @@ namespace ACE.Server.Entity
         /// <summary>
         /// The amount of time the spell lasts
         /// usually for EnchantmentSpell / FellowshipEnchantmentSpells
+        ///
+        /// If spell has DotDuration, this will return DotDuration + 5
+        /// This is to handle the odd way retail did DoT ticks
+        /// In retail, if a DoT had a duration of 15 seconds,
+        /// it would actually perform 4 ticks, instead of 3
+        /// Presumably DoT ticks happend on heartbeats, which are every 5 seconds by default
+        /// So there could be additional complication here if the target's Heartbeat is something other than 5
+        /// This also affects the value that is sent over the wire, which could be further investigated
         /// </summary>
         public double Duration { get => _spell != null && _spell.DotDuration.HasValue ? _spell.DotDuration.Value + 5.0f : _spellBase.Duration; }
 
@@ -106,6 +114,47 @@ namespace ACE.Server.Entity
         /// The DoT (damage over time) duration for the spell
         /// </summary>
         public double DotDuration { get => _spell.DotDuration ?? 0; }
+
+        /// <summary>
+        /// Returns the number of ticks for a DoT spell
+        /// </summary>
+        /// <param name="heartbeat">The PropertyFloat.HeartbeatInterval of the Creature with the enchantment</param>
+        public int GetNumTicks(float heartbeat = 5.0f)
+        {
+            if (DotDuration == 0)
+                return 0;
+
+            // see explanation of Duration, and why it sets Duration to DotDuration + 5
+
+            // For spell like Surge of Regeneration, which is listed as 19 seconds,
+            // this would be the equivalent of 20 seconds, ie. Ceil((19 + 5) / 5) = 5 ticks
+
+            return (int)Math.Ceiling(Duration / heartbeat);
+        }
+
+        /// <summary>
+        /// Returns the damage per tick for a DoT spell
+        /// </summary>
+        /// <param name="heartbeat">The PropertyFloat.HeartbeatInterval of the Creature with the enchantment</param>
+        public float GetDamagePerTick(float heartbeat = 5.0f)
+        {
+            if (DotDuration == 0)
+                return 0;
+
+            // normally we can just use the value in StatModVal for this,
+            // however it assumes that heartbeat is 5
+            if (heartbeat == 5.0f)
+                return StatModVal;
+
+            // calculate the total damage w/ default 5 heartbeats
+            // BaseIntensity could also maybe be used for this
+            var totalDamage = StatModVal * GetNumTicks();
+
+            // divide totalDamage by the actual # of heartbeats
+            var numTicks = GetNumTicks(heartbeat);
+
+            return totalDamage / numTicks;
+        }
 
         /// <summary>
         /// Unknown what this does?
@@ -250,22 +299,22 @@ namespace ACE.Server.Entity
         /// <summary>
         /// The offset to apply to the spawn position
         /// </summary>
-        public Vector3 CreateOffsetOrigin { get => new Vector3(_spell.CreateOffsetOriginX ?? 0.0f, _spell.CreateOffsetOriginY ?? 0.0f, _spell.CreateOffsetOriginZ ?? 0.0f); }
+        public Vector3 CreateOffset { get => new Vector3(_spell.CreateOffsetOriginX ?? 0.0f, _spell.CreateOffsetOriginY ?? 0.0f, _spell.CreateOffsetOriginZ ?? 0.0f); }
 
         /// <summary>
         /// The minimum amount of padding to ensure for the spell to spawn
         /// </summary>
-        public Vector3 PaddingOrigin { get => new Vector3(_spell.PaddingOriginX ?? 0.0f, _spell.PaddingOriginY ?? 0.0f, _spell.PaddingOriginZ ?? 0.0f); }
+        public Vector3 Padding { get => new Vector3(_spell.PaddingOriginX ?? 0.0f, _spell.PaddingOriginY ?? 0.0f, _spell.PaddingOriginZ ?? 0.0f); }
 
         /// <summary>
         /// The dimensions of the origin, used for Volley spells?
         /// </summary>
-        public Vector3 DimsOrigin { get => new Vector3(_spell.DimsOriginX ?? 0.0f, _spell.DimsOriginY ?? 0.0f, _spell.DimsOriginZ ?? 0.0f); }
+        public Vector3 Dims { get => new Vector3(_spell.DimsOriginX ?? 0.0f, _spell.DimsOriginY ?? 0.0f, _spell.DimsOriginZ ?? 0.0f); }
 
         /// <summary>
         /// The maximum variation for spawn position
         /// </summary>
-        public Vector3 PeturbationOrigin { get => new Vector3(_spell.PeturbationOriginX ?? 0.0f, _spell.PeturbationOriginY ?? 0.0f, _spell.PeturbationOriginZ ?? 0.0f); }
+        public Vector3 Peturbation { get => new Vector3(_spell.PeturbationOriginX ?? 0.0f, _spell.PeturbationOriginY ?? 0.0f, _spell.PeturbationOriginZ ?? 0.0f); }
 
         /// <summary>
         /// The imbued effect for this spell

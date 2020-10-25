@@ -8,9 +8,12 @@ using System.Net.Sockets;
 using System.Text;
 
 using ACE.Common.Cryptography;
+using ACE.Entity.Enum;
 using ACE.Server.Entity;
+using ACE.Server.Entity.Actions;
 using ACE.Server.Network.Enum;
 using ACE.Server.Network.GameMessages;
+using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.Network.Handlers;
 using ACE.Server.Network.Managers;
 
@@ -101,11 +104,6 @@ namespace ACE.Server.Network
                 currentBundleLocks[i] = new object();
                 currentBundles[i] = new NetworkBundle();
             }
-
-            ConnectionData.CryptoClient.OnCryptoSystemCatastrophicFailure += (sender, e) =>
-            {
-                session.Terminate(SessionTerminationReason.ClientConnectionFailure);
-            };
         }
 
         /// <summary>
@@ -236,13 +234,7 @@ namespace ACE.Server.Network
             var removalList = cachedPackets.Values.Where(x => (currentTime >= x.Header.Time ? currentTime : currentTime + ushort.MaxValue) - x.Header.Time > cachedPacketRetentionTime);
 
             foreach (var packet in removalList)
-            {
-                if (cachedPackets.TryRemove(packet.Header.Sequence, out var removedPacket))
-                {
-                    if (removedPacket.Data != null)
-                        removedPacket.Data.Dispose();
-                }
-            }
+                cachedPackets.TryRemove(packet.Header.Sequence, out _);
         }
 
         // This is called from ConnectionListener.OnDataReceieve()->Session.ProcessPacket()->This
@@ -267,10 +259,21 @@ namespace ACE.Server.Network
             if ((packet.Header.Flags & PacketHeaderFlags.RequestRetransmit) == PacketHeaderFlags.RequestRetransmit
                 && !((packet.Header.Flags & PacketHeaderFlags.EncryptedChecksum) == PacketHeaderFlags.EncryptedChecksum))
             {
+                List<uint> uncached = null;
+
                 foreach (uint sequence in packet.HeaderOptional.RetransmitData)
                 {
-                    Retransmit(sequence);
+                    if (!Retransmit(sequence))
+                    {
+                        if (uncached == null)
+                            uncached = new List<uint>();
+
+                        uncached.Add(sequence);
+                    }
                 }
+                if (uncached != null)
+                    SendRejectRetransmit(uncached);
+
                 NetworkStatistics.C2S_RequestsForRetransmit_Aggregate_Increment();
                 return; //cleartext crc NAK is never accompanied by additional data needed by the rest of the pipeline
             }
@@ -345,6 +348,9 @@ namespace ACE.Server.Network
 
             #endregion
         }
+
+        const uint MaxNumNakSeqIds = 115; //464 + header = 484;  (464 - 4) / 4
+
         /// <summary>
         /// request retransmission of lost sequences
         /// </summary>
@@ -355,14 +361,24 @@ namespace ACE.Server.Network
             List<uint> needSeq = new List<uint>();
             needSeq.Add(desiredSeq);
             uint bottom = desiredSeq + 1;
-            if (rcvdSeq - bottom > CryptoSystem.MaximumEffortLevel)
+            if (rcvdSeq < bottom || rcvdSeq - bottom > CryptoSystem.MaximumEffortLevel)
             {
                 session.Terminate(SessionTerminationReason.AbnormalSequenceReceived);
                 return;
             }
+            uint seqIdCount = 1;
             for (uint a = bottom; a < rcvdSeq; a++)
+            {
                 if (!outOfOrderPackets.ContainsKey(a))
+                {
                     needSeq.Add(a);
+                    seqIdCount++;
+                    if (seqIdCount >= MaxNumNakSeqIds)
+                    {
+                        break;
+                    }
+                }
+            }
 
             ServerPacket reqPacket = new ServerPacket();
             byte[] reqData = new byte[4 + (needSeq.Count * 4)];
@@ -378,7 +394,34 @@ namespace ACE.Server.Network
             packetLog.DebugFormat("[{0}] Requested retransmit of {1}", session.LoggingIdentifier, needSeq.Select(k => k.ToString()).Aggregate((a, b) => a + ", " + b));
             NetworkStatistics.S2C_RequestsForRetransmit_Aggregate_Increment();
         }
+
         private DateTime LastRequestForRetransmitTime = DateTime.MinValue;
+
+        /// <summary>
+        /// Sends a response packet w/ PacketHeader.RejectRetransmit
+        /// </summary>
+        /// <param name="seqs">A list of uncached packet sequences</param>
+        private void SendRejectRetransmit(List<uint> seqs)
+        {
+            var packet = new ServerPacket();
+
+            var data = new byte[4 + seqs.Count * 4];
+
+            var stream = new MemoryStream(data, 0, data.Length, true, true);
+            stream.Write(BitConverter.GetBytes(seqs.Count), 0, 4);
+
+            foreach (var seq in seqs)
+                stream.Write(BitConverter.GetBytes(seq), 0, 4);  // rolling offset?
+
+            packet.Data = stream;
+            packet.Header.Flags = PacketHeaderFlags.RejectRetransmit;
+
+            packet.Header.Id = ServerId;
+            packet.Header.Iteration = 0x14;  // ??
+            packet.Header.Time = (ushort)Timers.PortalYearTicks;
+
+            SendPacket(packet);
+        }
 
         /// <summary>
         /// Handles a packet<para />
@@ -391,7 +434,10 @@ namespace ACE.Server.Network
 
             // If we have an EchoRequest flag, we should flag to respond with an echo response on next send.
             if (packet.Header.HasFlag(PacketHeaderFlags.EchoRequest))
+            {
                 FlagEcho(packet.HeaderOptional.EchoRequestClientTime);
+                VerifyEcho(packet.HeaderOptional.EchoRequestClientTime);
+            }
 
             // If we have an AcknowledgeSequence flag, we can clear our cached packet buffer up to that sequence.
             if (packet.Header.HasFlag(PacketHeaderFlags.AckSequence))
@@ -525,6 +571,75 @@ namespace ACE.Server.Network
             }
         }
 
+        //private List<EchoStamp> EchoStamps = new List<EchoStamp>();
+
+        private static int EchoLogInterval = 5;
+        private static int EchoInterval = 10;
+        private static float EchoThreshold = 2.0f;
+        private static float DiffThreshold = 0.01f;
+
+        private float lastClientTime;
+        private DateTime lastServerTime;
+
+        private double lastDiff;
+        private int echoDiff;
+
+        private void VerifyEcho(float clientTime)
+        {
+            if (session.Player == null || session.logOffRequestTime != DateTime.MinValue)
+                return;
+
+            var serverTime = DateTime.UtcNow;
+
+            if (lastClientTime == 0)
+            {
+                lastClientTime = clientTime;
+                lastServerTime = serverTime;
+                return;
+            }
+
+            var serverTimeDiff = serverTime - lastServerTime;
+            var clientTimeDiff = clientTime - lastClientTime;
+
+            var diff = Math.Abs(serverTimeDiff.TotalSeconds - clientTimeDiff);
+
+            if (diff > EchoThreshold && diff - lastDiff > DiffThreshold)
+            {
+                lastDiff = diff;
+                echoDiff++;
+
+                if (echoDiff >= EchoLogInterval)
+                    log.Warn($"{session.Player.Name} - TimeSync error: {echoDiff} (diff: {diff})");
+
+                if (echoDiff >= EchoInterval)
+                {
+                    log.Error($"{session.Player.Name} - disconnected for speedhacking");
+
+                    var actionChain = new ActionChain();
+                    actionChain.AddAction(session.Player, () =>
+                    {
+                        //session.Network.EnqueueSend(new GameMessageBootAccount(session));
+                        session.Network.EnqueueSend(new GameMessageSystemChat($"TimeSync: client speed error", ChatMessageType.Broadcast));
+                        session.LogOffPlayer();
+
+                        echoDiff = 0;
+                        lastDiff = 0;
+                        lastClientTime = 0;
+
+                    });
+                    actionChain.EnqueueChain();
+                }
+            }
+            else if (echoDiff > 0)
+            {
+                if (echoDiff > EchoLogInterval)
+                    log.Warn($"{session.Player.Name} - Diff: {diff}");
+
+                lastDiff = 0;
+                echoDiff = 0;
+            }
+        }
+
         //is this special channel
         private void FlagEcho(float clientTime)
         {
@@ -548,16 +663,10 @@ namespace ACE.Server.Network
             var removalList = cachedPackets.Keys.Where(x => x < sequence);
 
             foreach (var key in removalList)
-            {
-                if (cachedPackets.TryRemove(key, out var removedPacket))
-                {
-                    if (removedPacket.Data != null)
-                        removedPacket.Data.Dispose();
-                }
-            }
+                cachedPackets.TryRemove(key, out _);
         }
 
-        private void Retransmit(uint sequence)
+        private bool Retransmit(uint sequence)
         {
             if (cachedPackets.TryGetValue(sequence, out var cachedPacket))
             {
@@ -567,10 +676,17 @@ namespace ACE.Server.Network
                     cachedPacket.Header.Flags |= PacketHeaderFlags.Retransmission;
 
                 SendPacketRaw(cachedPacket);
+
+                return true;
             }
             else
             {
-                log.Error($"retransmit requested packet {sequence} not in cache.");
+                if (cachedPackets.Count > 0)
+                    log.Error($"Session {session.Network?.ClientId}\\{session.EndPoint} ({session.Account}:{session.Player?.Name}) retransmit requested packet {sequence} not in cache. Cache range {cachedPackets.Keys.Min()} - {cachedPackets.Keys.Max()}.");
+                else
+                    log.Error($"Session {session.Network?.ClientId}\\{session.EndPoint} ({session.Account}:{session.Player?.Name}) retransmit requested packet {sequence} not in cache. Cache is empty.");
+
+                return false;
             }
         }
 
@@ -583,8 +699,10 @@ namespace ACE.Server.Network
                 if (packet.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum) && ConnectionData.PacketSequence.CurrentValue == 0)
                     ConnectionData.PacketSequence = new Sequence.UIntSequence(1);
 
+                bool isNak = packet.Header.Flags.HasFlag(PacketHeaderFlags.RequestRetransmit);
+
                 // If we are only ACKing, then we don't seem to have to increment the sequence
-                if (packet.Header.Flags == PacketHeaderFlags.AckSequence || packet.Header.Flags.HasFlag(PacketHeaderFlags.RequestRetransmit))
+                if (packet.Header.Flags == PacketHeaderFlags.AckSequence || isNak)
                     packet.Header.Sequence = ConnectionData.PacketSequence.CurrentValue;
                 else
                     packet.Header.Sequence = ConnectionData.PacketSequence.NextValue;
@@ -592,7 +710,7 @@ namespace ACE.Server.Network
                 packet.Header.Iteration = 0x14;
                 packet.Header.Time = (ushort)Timers.PortalYearTicks;
 
-                if (packet.Header.Sequence >= 2u)
+                if (packet.Header.Sequence >= 2u && !isNak)
                     cachedPackets.TryAdd(packet.Header.Sequence, packet);
 
                 SendPacket(packet);
@@ -606,7 +724,7 @@ namespace ACE.Server.Network
 
             if (packet.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum))
             {
-                uint issacXor = ConnectionData.IssacServer.GetOffset();
+                uint issacXor = ConnectionData.IssacServer.Next();
                 packetLog.DebugFormat("[{0}] Setting Issac for packet {1} to {2}", session.LoggingIdentifier, packet.GetHashCode(), issacXor);
                 packet.IssacXor = issacXor;
             }
@@ -625,8 +743,6 @@ namespace ACE.Server.Network
                 packet.CreateReadyToSendPacket(buffer, out var size);
 
                 packetLog.Debug(packet.ToString());
-
-                buffer = NetworkSyntheticTesting.SyntheticCorruption_S2C(buffer);
 
                 if (packetLog.IsDebugEnabled)
                 {
@@ -731,6 +847,8 @@ namespace ACE.Server.Network
 
                         foreach (MessageFragment fragment in fragments)
                         {
+                            bool fragmentSkipped = false;
+
                             // Is this a large fragment and does it have a tail that needs sending?
                             if (!fragment.TailSent && availableSpace >= fragment.TailSize)
                             {
@@ -747,9 +865,16 @@ namespace ACE.Server.Network
                                 packet.Fragments.Add(spf);
                                 availableSpace -= spf.Length;
                             }
+                            else
+                                fragmentSkipped = true;
+
                             // If message is out of data, set to remove it
                             if (fragment.DataRemaining <= 0)
                                 removeList.Add(fragment);
+
+                            // UIQueue messages must go out in order. Otherwise, you might see an NPC's tells in an order that doesn't match their defined emotes.
+                            if (fragmentSkipped && group == GameMessageGroup.UIQueue)
+                                break;
                         }
 
                         // Remove all completed messages
@@ -780,25 +905,25 @@ namespace ACE.Server.Network
             {
                 packetHeader.Flags |= PacketHeaderFlags.AckSequence;
                 packetLog.DebugFormat("[{0}] Outgoing AckSeq: {1}", session.LoggingIdentifier, lastReceivedPacketSequence);
-                packet.InitializeBodyWriter();
-                packet.BodyWriter.Write(lastReceivedPacketSequence);
+                packet.InitializeDataWriter();
+                packet.DataWriter.Write(lastReceivedPacketSequence);
             }
 
             if (bundle.TimeSync) // 0x1000000
             {
                 packetHeader.Flags |= PacketHeaderFlags.TimeSync;
                 packetLog.DebugFormat("[{0}] Outgoing TimeSync TS: {1}", session.LoggingIdentifier, Timers.PortalYearTicks);
-                packet.InitializeBodyWriter();
-                packet.BodyWriter.Write(Timers.PortalYearTicks);
+                packet.InitializeDataWriter();
+                packet.DataWriter.Write(Timers.PortalYearTicks);
             }
 
             if (bundle.ClientTime != -1f) // 0x4000000
             {
                 packetHeader.Flags |= PacketHeaderFlags.EchoResponse;
                 packetLog.DebugFormat("[{0}] Outgoing EchoResponse: {1}", session.LoggingIdentifier, bundle.ClientTime);
-                packet.InitializeBodyWriter();
-                packet.BodyWriter.Write(bundle.ClientTime);
-                packet.BodyWriter.Write((float)Timers.PortalYearTicks - bundle.ClientTime);
+                packet.InitializeDataWriter();
+                packet.DataWriter.Write(bundle.ClientTime);
+                packet.DataWriter.Write((float)Timers.PortalYearTicks - bundle.ClientTime);
             }
         }
 

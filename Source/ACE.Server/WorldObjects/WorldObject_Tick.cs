@@ -1,10 +1,12 @@
 using System;
 using System.Diagnostics;
+using System.Numerics;
 
 using ACE.Common;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
 using ACE.Server.Physics;
@@ -216,6 +218,8 @@ namespace ACE.Server.WorldObjects
             return (int)timeToExpiration.TotalSeconds;
         }
 
+        private int slowUpdateObjectPhysicsHits;
+
         /// <summary>
         /// Handles calling the physics engine for non-player objects
         /// </summary>
@@ -230,6 +234,7 @@ namespace ACE.Server.WorldObjects
                 return false;
 
             bool isDying = false;
+            bool cachedVelocityFix = false;
 
             if (this is Creature creature)
             {
@@ -247,6 +252,9 @@ namespace ACE.Server.WorldObjects
 
                 if (!runUpdate)
                     return false;
+
+                if (creature.IsMonster && !creature.IsAwake)
+                    cachedVelocityFix = true;
             }
             else
             {
@@ -322,7 +330,7 @@ namespace ACE.Server.WorldObjects
                 //Console.WriteLine("Dist: " + dist);
                 //Console.WriteLine("Velocity: " + PhysicsObj.Velocity);
 
-                if (this is SpellProjectile spellProjectile && spellProjectile.SpellType == SpellProjectile.ProjectileSpellType.Ring)
+                if (this is SpellProjectile spellProjectile && spellProjectile.SpellType == ProjectileSpellType.Ring)
                 {
                     var dist = spellProjectile.SpawnPos.DistanceTo(Location);
                     var maxRange = spellProjectile.Spell.BaseRangeConstant;
@@ -335,16 +343,42 @@ namespace ACE.Server.WorldObjects
                     }
                 }
 
+                if (cachedVelocityFix)
+                    PhysicsObj.CachedVelocity = Vector3.Zero;
+
                 return landblockUpdate;
             }
             finally
             {
                 var elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
                 ServerPerformanceMonitor.AddToCumulativeEvent(ServerPerformanceMonitor.CumulativeEventHistoryType.WorldObject_Tick_UpdateObjectPhysics, elapsedSeconds);
-                if (elapsedSeconds >= 1) // Yea, that ain't good....
+                if (elapsedSeconds >= 0.100) // Yea, that ain't good....
+                {
+                    slowUpdateObjectPhysicsHits++;
                     log.Warn($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}");
+
+                    // Destroy laggy projectiles
+                    if (slowUpdateObjectPhysicsHits >= 5 && this is SpellProjectile spellProjectile)
+                    {
+                        PhysicsObj.set_active(false);
+                        spellProjectile.ProjectileImpact();
+                    }
+                }
                 else if (elapsedSeconds >= 0.010)
-                    log.Debug($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}");
+                {
+                    slowUpdateObjectPhysicsHits++;
+
+                    // Destroy laggy projectiles
+                    if (slowUpdateObjectPhysicsHits >= 5 && this is SpellProjectile spellProjectile)
+                    {
+                        PhysicsObj.set_active(false);
+                        spellProjectile.ProjectileImpact();
+
+                        log.Warn($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}. SpellProjectile destroyed.");
+                    }
+                    else
+                        log.Debug($"[PERFORMANCE][PHYSICS] {Guid}:{Name} took {(elapsedSeconds * 1000):N1} ms to process UpdateObjectPhysics() at loc: {Location}");
+                }
             }
         }
     }

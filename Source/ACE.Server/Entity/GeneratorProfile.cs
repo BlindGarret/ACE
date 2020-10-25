@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using log4net;
 
 using ACE.Database;
-using ACE.Database.Models.Shard;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
 using ACE.Server.Factories;
 using ACE.Server.Physics.Common;
 using ACE.Server.WorldObjects;
@@ -22,9 +22,16 @@ namespace ACE.Server.Entity
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         /// <summary>
+        /// The id for the profile. This id will be either a GUID from Landblock_Instances or an incremental id based on profile order from biota entry. 
+        /// </summary>
+        public uint Id;
+
+        public string LinkId => Id > 0x70000000 ? $"0x{Id:X8}" : $"{Id}";
+
+        /// <summary>
         /// The biota with all the generator profile info
         /// </summary>
-        public BiotaPropertiesGenerator Biota;
+        public PropertiesGenerator Biota;
 
         /// <summary>
         /// A list of objects that have been spawned by this generator
@@ -102,7 +109,9 @@ namespace ACE.Server.Entity
         {
             get
             {
-                if (Generator is Chest || Generator.RegenerationInterval == 0)
+                // TODO: investigate this logic - why is the RegenerationInterval bit needed here?
+
+                if (Generator is Chest || !(Generator is PressurePlate) && Generator.RegenerationInterval == 0)
                     return 0;
 
                 return Biota.Delay ?? Generator.GeneratorProfiles[0].Biota.Delay ?? 0.0f;
@@ -120,10 +129,11 @@ namespace ACE.Server.Entity
         /// Constructs a new active generator profile
         /// from a biota generator
         /// </summary>
-        public GeneratorProfile(WorldObject generator, BiotaPropertiesGenerator biota)
+        public GeneratorProfile(WorldObject generator, PropertiesGenerator biota, uint profileId)
         {
             Generator = generator;
             Biota = biota;
+            Id = profileId;
         }
 
         /// <summary>
@@ -319,6 +329,7 @@ namespace ACE.Server.Entity
         {
             float genRadius = (float)(Generator.GetProperty(PropertyFloat.GeneratorRadius) ?? 0f);
             obj.Location = new ACE.Entity.Position(Generator.Location);
+            obj.Location.PositionZ += 0.05f;
 
             // we are going to delay this scatter logic until the physics engine,
             // where the remnants of this function are in the client (SetScatterPositionInternal)
@@ -380,13 +391,25 @@ namespace ACE.Server.Entity
 
         public bool VerifyWalkableSlope(WorldObject obj)
         {
-            if (!obj.Location.Indoors && !obj.Location.IsWalkable())
+            if (!obj.Location.Indoors && !obj.Location.IsWalkable() && !VerifyWalkableSlopeExcludedLandblocks.Contains(obj.Location.LandblockId.Landblock))
             {
                 //log.Debug($"{_generator.Name}.VerifyWalkableSlope({obj.Name}) - spawn location is unwalkable slope");
                 return false;
             }
             return true;
         }
+
+        /// <summary>
+        /// A list of landblocks the excluded from VerifyWalkableSlope check
+        /// 
+        /// TODO gmriggs
+        /// Hack until this can be looked into more.
+        /// </summary>
+        public static HashSet<ushort> VerifyWalkableSlopeExcludedLandblocks = new HashSet<ushort>()
+        {
+            0x9EE5,     // Northwatch Castle
+            0xF92F,     // Freebooter Keep
+        };
 
         /// <summary>
         /// Generates a randomized treasure from LootGenerationFactory
@@ -458,19 +481,36 @@ namespace ACE.Server.Entity
         {
             //log.Debug($"{_generator.Name}.NotifyGenerator({target:X8}, {eventType})");
 
-            if (eventType == RegenerationType.PickUp && (RegenerationType)Biota.WhenCreate == RegenerationType.Destruction)
-                eventType = RegenerationType.Destruction;
-
-            // If WhenCreate is Undef, assume it means Destruction (bad data)
-            if (eventType == RegenerationType.Destruction && (RegenerationType)Biota.WhenCreate == RegenerationType.Undef)
-                Biota.WhenCreate = (uint)RegenerationType.Destruction;
-
-            if (Biota.WhenCreate != (uint)eventType)
-                return;
-
             Spawned.TryGetValue(target.Full, out var woi);
 
             if (woi == null) return;
+
+            var adjEventType = eventType; // some generators use pickup when they mean to use destruction, some use destruction when they mean to use pickup. this data comes from 16py mostly and these issues are corrected below.
+            var whenCreate = (RegenerationType)Biota.WhenCreate;
+            var adjWhenCreate = (RegenerationType)Biota.WhenCreate;
+
+            if (eventType == RegenerationType.PickUp && whenCreate == RegenerationType.Destruction)
+                adjEventType = RegenerationType.Destruction;
+
+            if (eventType == RegenerationType.Destruction && whenCreate == RegenerationType.PickUp)
+                adjEventType = RegenerationType.PickUp;
+
+            // If WhenCreate is Undef, assume it means Destruction (bad data)
+            if (eventType == RegenerationType.Destruction && whenCreate == RegenerationType.Undef)
+                adjWhenCreate = RegenerationType.Destruction;
+
+            // If WhenCreate is Undef, assume it means Pickup (bad data)
+            if (eventType == RegenerationType.PickUp && whenCreate == RegenerationType.Undef)
+                adjWhenCreate = RegenerationType.PickUp;
+
+            //if (eventType != adjEventType)
+            //    log.Warn($"0x{Generator.Guid}:{Generator.Name}({Generator.WeenieClassId}).GeneratorProfile[{LinkId}].NotifyGenerator: RegenerationType = {eventType.ToString()}, WhenCreate = {whenCreate.ToString()}, Using {adjEventType.ToString()} as RegenerationType instead");
+
+            if (whenCreate != adjWhenCreate)
+                log.Warn($"0x{Generator.Guid}:{Generator.Name}({Generator.WeenieClassId}).GeneratorProfile[{LinkId}].NotifyGenerator: RegenerationType = {eventType.ToString()}, WhenCreate = {whenCreate.ToString()}, Using {adjWhenCreate.ToString()} as WhenCreate instead");
+
+            if (adjWhenCreate != adjEventType)
+                return;            
 
             RemoveQueue.Enqueue((DateTime.UtcNow.AddSeconds(Delay), woi.Guid.Full));
         }

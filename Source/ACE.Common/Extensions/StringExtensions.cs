@@ -1,3 +1,5 @@
+using System;
+
 namespace ACE.Common.Extensions
 {
     public static class StringExtensions
@@ -20,8 +22,32 @@ namespace ACE.Common.Extensions
         {
             if (name.EndsWith("ch") || name.EndsWith("s") || name.EndsWith("sh") || name.EndsWith("x") || name.EndsWith("z"))
                 return name + "es";
+            else if (name.EndsWith("th"))
+                return name;
             else
                 return name + "s";
+        }
+
+        /// <summary>
+        /// Removes a string from the beginning of a string
+        /// </summary>
+        public static string TrimStart(this string result, string trimStart)
+        {
+            if (result.StartsWith(trimStart, StringComparison.OrdinalIgnoreCase))
+                result = result.Substring(trimStart.Length);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Removes a string from the end of a string
+        /// </summary>
+        public static string TrimEnd(this string result, string trimEnd)
+        {
+            if (result.EndsWith(trimEnd, StringComparison.OrdinalIgnoreCase))
+                result = result.Substring(0, result.Length - trimEnd.Length);
+
+            return result;
         }
     }
 }

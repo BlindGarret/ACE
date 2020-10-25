@@ -1,4 +1,5 @@
 using System;
+
 using ACE.Entity.Enum;
 using ACE.Server.Network.GameMessages.Messages;
 using ACE.Server.WorldObjects;
@@ -52,6 +53,11 @@ namespace ACE.Server.Entity
         public bool IsTurning { get; set; }
 
         /// <summary>
+        /// Information required for performing the windup
+        /// </summary>
+        public WindupParams WindupParams { get; set; }
+
+        /// <summary>
         /// Information required for launching the spell
         /// </summary>
         public CastSpellParams CastSpellParams { get; set; }
@@ -65,6 +71,12 @@ namespace ACE.Server.Entity
         /// The time when the player pressed the key to begin spell casting
         /// </summary>
         public DateTime StartTime { get; set; }
+
+        /// <summary>
+        /// If a player interrupts a TurnTo during casting,
+        /// the TurnTo resumes when the player is no longer holding any Turn keys
+        /// </summary>
+        public bool PendingTurnRelease { get; set; }
 
         /// <summary>
         /// Tracks the cast # for /recordcast
@@ -88,6 +100,21 @@ namespace ACE.Server.Entity
         /// </summary>
         public DateTime CastGestureStartTime { get; set; }
 
+        /// <summary>
+        /// This is only used if server option spellcast_recoil_queue = true
+        /// Allows the player to queue the next spellcast as soon as the previous spell is released
+        /// </summary>
+        public bool CanQueue;
+        public CastQueue CastQueue;
+
+        /// <summary>
+        /// By default, MoveToManager waits for the player to be in Ready state
+        /// before beginning a TurnTo. For some motions, such as immmediately after the CastGesture,
+        /// this can produce unnecessary delays.
+        /// This will be set to TRUE only for the first turn after the CastGesture
+        /// </summary>
+        public bool AlwaysTurn;
+
         public MagicState(Player player)
         {
             Player = player;
@@ -103,6 +130,10 @@ namespace ACE.Server.Entity
             CastMotionDone = false;
             TurnStarted = false;
             IsTurning = false;
+            PendingTurnRelease = false;
+            CanQueue = false;
+            CastQueue = null;
+            AlwaysTurn = false;
 
             StartTime = DateTime.UtcNow;
             CastGestureStartTime = DateTime.MinValue;
@@ -130,6 +161,11 @@ namespace ACE.Server.Entity
             CastMotionDone = false;
             TurnStarted = false;
             IsTurning = false;
+            PendingTurnRelease = false;
+            Player.TurnTarget = null;
+            CanQueue = false;
+            CastQueue = null;
+            AlwaysTurn = false;
 
             CastGesture = MotionCommand.Invalid;
             CastGestureStartTime = DateTime.MinValue;
@@ -145,6 +181,7 @@ namespace ACE.Server.Entity
             }
 
             CastSpellParams = null;
+            WindupParams = null;
         }
 
         public void SetCastParams(Spell spell, bool isWeaponSpell, uint magicSkill, uint manaUsed, WorldObject target, Player.CastingPreCheckStatus status)
@@ -155,16 +192,23 @@ namespace ACE.Server.Entity
                 Player.RecordCast.Log($"Target Location: {CastSpellParams.Target.Location.ToLOCString()}");
         }
 
+        public void SetWindupParams(uint targetGuid, uint spellId, bool builtInSpell)
+        {
+            WindupParams = new WindupParams(targetGuid, spellId, builtInSpell);
+        }
+
         public override string ToString()
         {
             var str = $"Player: {Player.Name} ({Player.Guid})\n";
             str += $"IsCasting: {IsCasting}\n";
+            str += $"CastMotionStarted: {CastMotionDone}\n";
             str += $"CastMotionDone: {CastMotionDone}\n";
             str += $"TurnStarted: {TurnStarted}\n";
             str += $"IsTurning: {IsTurning}\n";
+            str += $"WindupParams: {WindupParams}\n";
             str += $"CastSpellParams: {CastSpellParams}\n";
             str += $"CastGesture: {CastGesture}\n";
-            str += $"StartTime: {StartTime}\n";
+            str += $"StartTime: {StartTime}";
             return str;
         }
     }
