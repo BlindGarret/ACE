@@ -128,7 +128,7 @@ namespace ACE.Server.Network.Structure
                 if (rawState.SidestepCommand == MotionCommand.SideStepLeft)
                     interpState.SidestepSpeed *= -1;
 
-                Math.Clamp(interpState.SidestepSpeed, -3, 3);
+                interpState.SidestepSpeed = Math.Clamp(interpState.SidestepSpeed, -3, 3);
             }
 
             // rotate
@@ -136,6 +136,10 @@ namespace ACE.Server.Network.Structure
             {
                 interpState.TurnCommand = MotionCommand.TurnRight;
                 interpState.TurnSpeed = holdKey == HoldKey.Run ? 1.5f : 1.0f;
+
+                // mouselook
+                if (rawState.TurnSpeed != 0 && rawState.TurnSpeed <= 1.5f)
+                    interpState.TurnSpeed = rawState.TurnSpeed;
 
                 if (rawState.TurnCommand == MotionCommand.TurnLeft)
                     interpState.TurnSpeed *= -1;

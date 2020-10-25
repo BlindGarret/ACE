@@ -12,13 +12,13 @@ using log4net;
 
 using ACE.Common.Performance;
 using ACE.Database;
-using ACE.Database.Models.Shard;
 using ACE.Database.Models.World;
 using ACE.DatLoader;
 using ACE.DatLoader.FileTypes;
 using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
+using ACE.Entity.Models;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
 using ACE.Server.Managers;
@@ -54,6 +54,11 @@ namespace ACE.Server.Entity
         /// Flag indicates if this landblock is permanently loaded (for example, towns on high-traffic servers)
         /// </summary>
         public bool Permaload = false;
+
+        /// <summary>
+        /// Flag indicates if this landblock has no keep alive objects
+        /// </summary>
+        public bool HasNoKeepAliveObjects = true;
 
         /// <summary>
         /// This must be true before a player enters a landblock.
@@ -170,9 +175,10 @@ namespace ACE.Server.Entity
             PhysicsLandblock = new Physics.Common.Landblock(cellLandblock);
         }
 
-        public void Init()
+        public void Init(bool reload = false)
         {
-            PhysicsLandblock.PostInit();
+            if (!reload)
+                PhysicsLandblock.PostInit();
 
             Task.Run(() =>
             {
@@ -193,7 +199,7 @@ namespace ACE.Server.Entity
         private void CreateWorldObjects()
         {
             var objects = DatabaseManager.World.GetCachedInstancesByLandblock(Id.Landblock);
-            var shardObjects = DatabaseManager.Shard.GetStaticObjectsByLandblock(Id.Landblock);
+            var shardObjects = DatabaseManager.Shard.BaseDatabase.GetStaticObjectsByLandblock(Id.Landblock);
             var factoryObjects = WorldObjectFactory.CreateNewWorldObjects(objects, shardObjects);
 
             actionQueue.EnqueueAction(new ActionEventDelegate(() =>
@@ -241,7 +247,7 @@ namespace ACE.Server.Entity
         /// </summary>
         private void SpawnDynamicShardObjects()
         {
-            var dynamics = DatabaseManager.Shard.GetDynamicObjectsByLandblock(Id.Landblock);
+            var dynamics = DatabaseManager.Shard.BaseDatabase.GetDynamicObjectsByLandblock(Id.Landblock);
             var factoryShardObjects = WorldObjectFactory.CreateWorldObjects(dynamics);
 
             actionQueue.EnqueueAction(new ActionEventDelegate(() =>
@@ -288,9 +294,22 @@ namespace ACE.Server.Entity
 
                     wo.ReinitializeHeartbeats();
 
-                    foreach (var profile in wo.Biota.BiotaPropertiesGenerator)
+                    if (wo.Biota.PropertiesGenerator != null)
                     {
-                        profile.Delay = (float)PropertyManager.GetDouble("encounter_delay").Item;
+                        // While this may be ugly, it's done for performance reasons.
+                        // Common weenie properties are not cloned into the bota on creation. Instead, the biota references simply point to the weenie collections.
+                        // The problem here is that we want to update one of those common collection properties. If the biota is referencing the weenie collection,
+                        // then we'll end up updating the global weenie (from the cache), instead of just this specific biota.
+                        if (wo.Biota.PropertiesGenerator == wo.Weenie.PropertiesGenerator)
+                        {
+                            wo.Biota.PropertiesGenerator = new List<PropertiesGenerator>(wo.Weenie.PropertiesGenerator.Count);
+
+                            foreach (var record in wo.Weenie.PropertiesGenerator)
+                                wo.Biota.PropertiesGenerator.Add(record.Clone());
+                        }
+
+                        foreach (var profile in wo.Biota.PropertiesGenerator)
+                            profile.Delay = (float) PropertyManager.GetDouble("encounter_delay").Item;
                     }
                 }
 
@@ -380,24 +399,7 @@ namespace ACE.Server.Entity
             foreach (WorldObject wo in worldObjects.Values)
             {
                 // set to TRUE if object changes landblock
-                var landblockUpdate = false;
-
-                // detect player movement
-                // TODO: handle players the same as everything else
-                if (wo is Player player)
-                {
-                    wo.InUpdate = true;
-
-                    var newPosition = HandlePlayerPhysics(player);
-
-                    // update position through physics engine
-                    if (newPosition != null)
-                        landblockUpdate = wo.UpdatePlayerPhysics(newPosition);
-
-                    wo.InUpdate = false;
-                }
-                else
-                    landblockUpdate = wo.UpdateObjectPhysics();
+                var landblockUpdate = wo.UpdateObjectPhysics();
 
                 if (landblockUpdate)
                     movedObjects.Add(wo);
@@ -405,24 +407,6 @@ namespace ACE.Server.Entity
 
             Monitor5m.Pause();
             Monitor1h.Pause();
-        }
-
-        /// <summary>
-        /// Detects if player has moved through ForcedLocation or RequestedLocation
-        /// </summary>
-        private static Position HandlePlayerPhysics(Player player)
-        {
-            Position newPosition = null;
-
-            if (player.ForcedLocation != null)
-                newPosition = player.ForcedLocation;
-            else if (player.RequestedLocation != null)
-                newPosition = player.RequestedLocation;
-
-            if (newPosition != null)
-                player.ClearRequestedPositions();
-
-            return newPosition;
         }
 
         /// <summary>
@@ -495,10 +479,22 @@ namespace ACE.Server.Entity
                     }
                 }
 
-                if (!Permaload)
+                if (!Permaload && HasNoKeepAliveObjects)
                 {
                     if (lastActiveTime + dormantInterval < thisHeartBeat)
+                    {
+                        if (!IsDormant)
+                        {
+                            var spellProjectiles = worldObjects.Values.Where(i => i is SpellProjectile).ToList();
+                            foreach (var spellProjectile in spellProjectiles)
+                            {
+                                spellProjectile.PhysicsObj.set_active(false);
+                                spellProjectile.Destroy();
+                            }
+                        }
+
                         IsDormant = true;
+                    }
                     if (lastActiveTime + UnloadInterval < thisHeartBeat)
                         LandblockManager.AddToDestructionQueue(this);
                 }
@@ -640,6 +636,9 @@ namespace ACE.Server.Entity
                     InsertWorldObjectIntoSortedHeartbeatList(kvp.Value);
                     InsertWorldObjectIntoSortedGeneratorUpdateList(kvp.Value);
                     InsertWorldObjectIntoSortedGeneratorRegenerationList(kvp.Value);
+
+                    if (kvp.Value.WeenieClassId == 80007) // Landblock KeepAlive weenie (ACE custom)
+                        HasNoKeepAliveObjects = false;
                 }
 
                 pendingAdditions.Clear();
@@ -659,6 +658,14 @@ namespace ACE.Server.Entity
                         sortedWorldObjectsByNextHeartbeat.Remove(wo);
                         sortedGeneratorsByNextGeneratorUpdate.Remove(wo);
                         sortedGeneratorsByNextRegeneration.Remove(wo);
+
+                        if (wo.WeenieClassId == 80007) // Landblock KeepAlive weenie (ACE custom)
+                        {
+                            var keepAliveObject = worldObjects.Values.FirstOrDefault(w => w.WeenieClassId == 80007);
+
+                            if (keepAliveObject == null)
+                                HasNoKeepAliveObjects = true;
+                        }
                     }
                 }
 
@@ -807,6 +814,8 @@ namespace ACE.Server.Entity
 
             if (wo.PhysicsObj == null)
                 wo.InitPhysicsObj();
+            else
+                wo.PhysicsObj.set_object_guid(wo.Guid);  // re-add to ServerObjectManager
 
             if (wo.PhysicsObj.CurCell == null)
             {
@@ -821,7 +830,7 @@ namespace ACE.Server.Entity
                         wo.NotifyOfEvent(RegenerationType.PickUp); // Notify generator the generated object is effectively destroyed, use Pickup to catch both cases.
                     }
 
-                    else if (wo.ProjectileTarget == null)
+                    else if (wo.ProjectileTarget == null && !(wo is SpellProjectile))
                         log.Warn($"AddWorldObjectInternal: couldn't spawn 0x{wo.Guid}:{wo.Name} [{wo.WeenieClassId} - {wo.WeenieType}]");
 
                     return false;
@@ -884,14 +893,18 @@ namespace ACE.Server.Entity
             }
         }
 
-        public void EmitSignal(Player player, string message)
+        public void EmitSignal(WorldObject emitter, string message)
         {
+            if (string.IsNullOrWhiteSpace(message)) return;
+
             foreach (var wo in worldObjects.Values.Where(w => w.HearLocalSignals).ToList())
             {
-                if (player.IsWithinUseRadiusOf(wo, wo.HearLocalSignalsRadius))
+                if (emitter == wo) continue;
+
+                if (emitter.IsWithinUseRadiusOf(wo, wo.HearLocalSignalsRadius))
                 {
-                    //Console.WriteLine($"{wo.Name}.EmoteManager.OnLocalSignal({player.Name}, {message})");
-                    wo.EmoteManager.OnLocalSignal(player, message);
+                    //Console.WriteLine($"{wo.Name}.EmoteManager.OnLocalSignal({emitter.Name}, {message})");
+                    wo.EmoteManager.OnLocalSignal(emitter, message);
                 }
             }
         }
@@ -1052,6 +1065,26 @@ namespace ACE.Server.Entity
             LScape.unload_landblock(landblockID);
         }
 
+        public void DestroyAllNonPlayerObjects()
+        {
+            ProcessPendingWorldObjectAdditionsAndRemovals();
+
+            SaveDB();
+
+            // remove all objects
+            foreach (var wo in worldObjects.Where(i => !(i.Value is Player)).ToList())
+            {
+                if (!wo.Value.BiotaOriginatedFromOrHasBeenSavedToDatabase())
+                    wo.Value.Destroy(false);
+                else
+                    RemoveWorldObjectInternal(wo.Key);
+            }
+
+            ProcessPendingWorldObjectAdditionsAndRemovals();
+
+            actionQueue.Clear();
+        }
+
         private void SaveDB()
         {
             var biotas = new Collection<(Biota biota, ReaderWriterLockSlim rwLock)>();
@@ -1085,7 +1118,7 @@ namespace ACE.Server.Entity
         /// This is a rarely used method to broadcast network messages to all of the players within a landblock,
         /// and possibly the adjacent landblocks.
         /// </summary>
-        public void EnqueueBroadcast(ICollection<Player> excludeList, bool adjacents, params GameMessage[] msgs)
+        public void EnqueueBroadcast(ICollection<Player> excludeList, bool adjacents, Position pos = null, float? maxRangeSq = null, params GameMessage[] msgs)
         {
             var players = worldObjects.Values.OfType<Player>();
 
@@ -1096,20 +1129,29 @@ namespace ACE.Server.Entity
 
             // broadcast messages to player in this landblock
             foreach (var player in players)
+            {
+                if (pos != null && maxRangeSq != null)
+                {
+                    var distSq = player.Location.SquaredDistanceTo(pos);
+                    if (distSq > maxRangeSq)
+                        continue;
+                }
                 player.Session.Network.EnqueueSend(msgs);
+            }
 
             // if applicable, iterate into adjacent landblocks
             if (adjacents)
             {
                 foreach (var adjacent in this.Adjacents.Where(adj => adj != null))
-                    adjacent.EnqueueBroadcast(excludeList, false, msgs);
+                    adjacent.EnqueueBroadcast(excludeList, false, pos, maxRangeSq, msgs);
             }
         }
 
         private bool? isDungeon;
 
         /// <summary>
-        /// Returns TRUE if this landblock is a dungeon
+        /// Returns TRUE if this landblock is a dungeon,
+        /// with no traversable overworld
         /// </summary>
         public bool IsDungeon
         {
@@ -1136,21 +1178,30 @@ namespace ACE.Server.Entity
             }
         }
 
-        private bool? isHouseDungeon;
+        private bool? hasDungeon;
 
-        public bool IsHouseDungeon
+        /// <summary>
+        /// Returns TRUE if this landblock contains a dungeon
+        //
+        /// If a landblock contains both a dungeon + traversable overworld,
+        /// this field will return TRUE, whereas IsDungeon will return FALSE
+        /// 
+        /// This property should only be used in very specific scenarios,
+        /// such as determining if a landblock contains a mansion basement
+        /// </summary>
+        public bool HasDungeon
         {
             get
             {
                 // return cached value
-                if (isHouseDungeon != null)
-                    return isHouseDungeon.Value;
+                if (hasDungeon != null)
+                    return hasDungeon.Value;
 
-                isHouseDungeon = IsDungeon ? DatabaseManager.World.GetCachedHousePortalsByLandblock(Id.Landblock).Count > 0 : false;
-
-                return isHouseDungeon.Value;
+                hasDungeon = LandblockInfo != null && LandblockInfo.NumCells > 0 && LandblockInfo.Buildings != null && LandblockInfo.Buildings.Count == 0;
+                return hasDungeon.Value;
             }
         }
+
 
         public List<House> Houses = new List<House>();
 

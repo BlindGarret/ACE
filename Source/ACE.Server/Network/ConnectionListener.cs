@@ -27,6 +27,7 @@ namespace ACE.Server.Network
         public ConnectionListener(IPAddress host, uint port)
         {
             log.DebugFormat("ConnectionListener ctor, host {0} port {1}", host, port);
+
             listeningHost = host;
             listeningPort = port;
         }
@@ -34,6 +35,7 @@ namespace ACE.Server.Network
         public void Start()
         {
             log.DebugFormat("Starting ConnectionListener, host {0} port {1}", listeningHost, listeningPort);
+
             try
             {
                 ListenerEndpoint = new IPEndPoint(listeningHost, (int)listeningPort);
@@ -51,6 +53,7 @@ namespace ACE.Server.Network
         public void Shutdown()
         {
             log.DebugFormat("Shutting down ConnectionListener, host {0} port {1}", listeningHost, listeningPort);
+
             if (Socket != null && Socket.IsBound)
                 Socket.Close();
         }
@@ -60,7 +63,7 @@ namespace ACE.Server.Network
             try
             {
                 EndPoint clientEndPoint = new IPEndPoint(listeningHost, 0);
-                Socket.BeginReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref clientEndPoint, OnDataReceieve, Socket);
+                Socket.BeginReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref clientEndPoint, OnDataReceive, Socket);
             }
             catch (SocketException socketException)
             {
@@ -73,16 +76,14 @@ namespace ACE.Server.Network
             }
         }
 
-        private void OnDataReceieve(IAsyncResult result)
+        private void OnDataReceive(IAsyncResult result)
         {
             EndPoint clientEndPoint = null;
+
             try
             {
                 clientEndPoint = new IPEndPoint(listeningHost, 0);
                 int dataSize = Socket.EndReceiveFrom(result, ref clientEndPoint);
-
-                byte[] data = new byte[dataSize];
-                Buffer.BlockCopy(buffer, 0, data, 0, dataSize);
 
                 IPEndPoint ipEndpoint = (IPEndPoint)clientEndPoint;
 
@@ -90,15 +91,21 @@ namespace ACE.Server.Network
 
                 if (packetLog.IsDebugEnabled)
                 {
+                    byte[] data = new byte[dataSize];
+                    Buffer.BlockCopy(buffer, 0, data, 0, dataSize);
+
                     StringBuilder sb = new StringBuilder();
                     sb.AppendLine($"Received Packet (Len: {data.Length}) [{ipEndpoint.Address}:{ipEndpoint.Port}=>{ListenerEndpoint.Address}:{ListenerEndpoint.Port}]");
                     sb.AppendLine(data.BuildPacketString());
                     packetLog.Debug(sb.ToString());
                 }
 
-                var packet = new ClientPacket(data);
-                if (packet.IsValid)
+                var packet = new ClientPacket();
+
+                if (packet.Unpack(buffer, dataSize))
                     NetworkManager.ProcessPacket(this, packet, ipEndpoint);
+
+                packet.ReleaseBuffer();
             }
             catch (SocketException socketException)
             {
@@ -117,6 +124,7 @@ namespace ACE.Server.Network
                     return;
                 }
             }
+
             Listen();
         }
     }

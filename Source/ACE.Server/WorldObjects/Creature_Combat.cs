@@ -1,10 +1,8 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
 
 using ACE.Common;
-using ACE.DatLoader.Entity;
+using ACE.Entity;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
@@ -16,14 +14,28 @@ namespace ACE.Server.WorldObjects
 {
     partial class Creature
     {
-        public CombatMode CombatMode { get; private set; }
+        public enum DebugDamageType
+        {
+            None     = 0x0,
+            Attacker = 0x1,
+            Defender = 0x2,
+            All      = Attacker | Defender
+        };
+
+        public DebugDamageType DebugDamage;
+
+        public ObjectGuid DebugDamageTarget;
 
         /// <summary>
         /// The list of combat maneuvers performable by this creature
         /// </summary>
         public DatLoader.FileTypes.CombatManeuverTable CombatTable { get; set; }
 
-        public DamageHistory DamageHistory;
+        public CombatMode CombatMode { get; protected set; }
+
+        public AttackType AttackType { get; set; }
+
+        public DamageHistory DamageHistory { get; private set; }
 
         /// <summary>
         /// Handles queueing up multiple animation sequences between packets
@@ -122,13 +134,15 @@ namespace ACE.Server.WorldObjects
 
             float peace1 = 0.0f, unarmed = 0.0f, peace2 = 0.0f;
 
+            // this is now handled as a proper 2-step process in HandleActionChangeCombatMode / NextUseTime
+
             // FIXME: just call generic method to switch to HandCombat first
             peace1 = MotionTable.GetAnimationLength(MotionTableId, CurrentMotionState.Stance, MotionCommand.Ready, MotionCommand.NonCombat);
-            if (CurrentMotionState.Stance != MotionStance.HandCombat && combatStance != MotionStance.HandCombat)
+            /*if (CurrentMotionState.Stance != MotionStance.HandCombat && combatStance != MotionStance.HandCombat)
             {
                 unarmed = MotionTable.GetAnimationLength(MotionTableId, MotionStance.NonCombat, MotionCommand.Ready, MotionCommand.HandCombat);
                 peace2 = MotionTable.GetAnimationLength(MotionTableId, MotionStance.HandCombat, MotionCommand.Ready, MotionCommand.NonCombat);
-            }
+            }*/
 
             SetStance(MotionStance.NonCombat, false);
 
@@ -447,6 +461,9 @@ namespace ACE.Server.WorldObjects
         public virtual uint GetEffectiveAttackSkill()
         {
             var attackSkill = GetCreatureSkill(GetCurrentAttackSkill()).Current;
+
+            // TODO: don't use for bow?
+            // https://asheron.fandom.com/wiki/Developer_Chat_-_2002/09/23
             var offenseMod = GetWeaponOffenseModifier(this);
 
             // monsters don't use accuracy mod?
@@ -467,7 +484,12 @@ namespace ACE.Server.WorldObjects
             var imbuedEffectType = defenseSkill == Skill.MissileDefense ? ImbuedEffectType.MissileDefense : ImbuedEffectType.MeleeDefense;
             var defenseImbues = GetDefenseImbues(imbuedEffectType);
 
-            var effectiveDefense = (uint)Math.Round(GetCreatureSkill(defenseSkill).Current * defenseMod * burdenMod + defenseImbues);
+            var stanceMod = this is Player player ? player.GetDefenseStanceMod() : 1.0f;
+
+            //if (this is Player)
+                //Console.WriteLine($"StanceMod: {stanceMod}");
+
+            var effectiveDefense = (uint)Math.Round(GetCreatureSkill(defenseSkill).Current * defenseMod * burdenMod * stanceMod + defenseImbues);
 
             if (IsExhausted) effectiveDefense = 0;
 
@@ -540,22 +562,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public string GetSplatterDir(WorldObject target)
         {
-            var sourcePos = new Vector3(Location.PositionX, Location.PositionY, 0);
-            var targetPos = new Vector3(target.Location.PositionX, target.Location.PositionY, 0);
-            var targetDir = new AFrame(target.Location.Pos, target.Location.Rotation).get_vector_heading();
+            var quadrant = GetRelativeDir(target);
 
-            targetDir.Z = 0;
-            targetDir = Vector3.Normalize(targetDir);
+            var splatterDir = quadrant.HasFlag(Quadrant.Left) ? "Left" : "Right";
+            splatterDir += quadrant.HasFlag(Quadrant.Front) ? "Front" : "Back";
 
-            var sourceToTarget = Vector3.Normalize(sourcePos - targetPos);
-
-            var dir = Vector3.Dot(sourceToTarget, targetDir);
-            var angle = Vector3.Cross(sourceToTarget, targetDir);
-
-            var frontBack = dir >= 0 ? "Front" : "Back";
-            var leftRight = angle.Z <= 0 ? "Left" : "Right";
-
-            return leftRight + frontBack;
+            return splatterDir;
         }
 
         public double GetLifeResistance(DamageType damageType)
@@ -651,9 +663,13 @@ namespace ACE.Server.WorldObjects
 
             // shield AL item enchantment additives:
             // impenetrability, brittlemail
-            var ignoreMagicArmor = weapon != null ? weapon.IgnoreMagicArmor : false;
+            var ignoreMagicArmor = (weapon?.IgnoreMagicArmor ?? false) || (attacker?.IgnoreMagicArmor ?? false);
 
-            var modSL = ignoreMagicArmor ? 0 : shield.EnchantmentManager.GetArmorMod();
+            var modSL = shield.EnchantmentManager.GetArmorMod();
+
+            if (ignoreMagicArmor)
+                modSL = attacker is Player ? (int)Math.Round(IgnoreMagicArmorScaled(modSL)) : 0;
+
             var effectiveSL = baseSL + modSL;
 
             // get shield RL against damage type
@@ -661,15 +677,19 @@ namespace ACE.Server.WorldObjects
 
             // shield RL item enchantment additives:
             // banes, lures
-            var modRL = ignoreMagicArmor ? 0 : shield.EnchantmentManager.GetArmorModVsType(damageType);
+            var modRL = shield.EnchantmentManager.GetArmorModVsType(damageType);
+
+            if (ignoreMagicArmor)
+                modRL = attacker is Player ? IgnoreMagicArmorScaled(modRL) : 0.0f;
+
             var effectiveRL = (float)(baseRL + modRL);
 
             // resistance clamp
             effectiveRL = Math.Clamp(effectiveRL, -2.0f, 2.0f);
 
             // handle negative SL
-            if (effectiveSL < 0)
-                effectiveRL = 1.0f / effectiveRL;
+            //if (effectiveSL < 0 && effectiveRL != 0)
+                //effectiveRL = 1.0f / effectiveRL;
 
             var effectiveLevel = effectiveSL * effectiveRL;
 
@@ -683,6 +703,11 @@ namespace ACE.Server.WorldObjects
                 shieldCap = (uint)Math.Round(shieldCap / 2.0f);
 
             effectiveLevel = Math.Min(effectiveLevel, shieldCap);
+
+            var ignoreShieldMod = attacker.GetIgnoreShieldMod(weapon);
+            //Console.WriteLine($"IgnoreShieldMod: {ignoreShieldMod}");
+
+            effectiveLevel *= ignoreShieldMod;
 
             // SL is multiplied by existing AL
             var shieldMod = SkillFormula.CalcArmorMod(effectiveLevel);
@@ -755,7 +780,7 @@ namespace ACE.Server.WorldObjects
             //Console.WriteLine($"Sneak attack {(behind ? "behind" : "front")}, chance {Math.Round(chance * 100)}%");
 
             var rng = ThreadSafeRandom.Next(0.0f, 1.0f);
-            if (rng > chance)
+            if (rng >= chance)
                 return 1.0f;
 
             // Damage Rating:
@@ -851,7 +876,7 @@ namespace ACE.Server.WorldObjects
             }
 
             var rng = ThreadSafeRandom.Next(0.0f, 1.0f);
-            if (rng > chance)
+            if (rng >= chance)
                 return;
 
             switch (AttackHeight)
@@ -997,14 +1022,6 @@ namespace ACE.Server.WorldObjects
             }
         }
 
-        /// <summary>
-        /// Returns the current attack maneuver for a non-player creature
-        /// </summary>
-        public virtual AttackType GetAttackType(WorldObject weapon, CombatManeuver combatManeuver)
-        {
-            return combatManeuver != null ? combatManeuver.AttackType : AttackType.Undef;
-        }
-
         public virtual bool CanDamage(Creature target)
         {
             if (target is Player)
@@ -1023,6 +1040,13 @@ namespace ACE.Server.WorldObjects
                     if (sourcePet && targetPet)     // combat pets can't damage other pets
                         return false;
                     else
+                        return true;
+                }
+
+                // faction mobs
+                if (Faction1Bits != null || target.Faction1Bits != null)
+                {
+                    if (AllowFactionCombat(target))
                         return true;
                 }
                 return false;
@@ -1085,14 +1109,28 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public bool AlertMonster(Creature monster)
         {
-            if ((monster.Attackable || monster.TargetingTactic != TargetingTactic.None) && monster.MonsterState == State.Idle && monster.Tolerance == Tolerance.None)
-            {
-                //Console.WriteLine($"[{Timers.RunningTime}] - {monster.Name} ({monster.Guid}) - waking up");
-                monster.AttackTarget = this;
-                monster.WakeUp();
-                return true;
-            }
-            return false;
+            // non-attackable creatures do not get aggroed,
+            // unless they have a TargetingTactic, such as the invisible archers in Oswald's Dirk Quest
+            if (!monster.Attackable && monster.TargetingTactic == TargetingTactic.None)
+                return false;
+
+            // ensure monster is currently in idle state to wake up,
+            // and it has no tolerance to players running nearby
+            // TODO: investigate usage for tolerance
+            if (monster.MonsterState != State.Idle || monster.Tolerance != Tolerance.None)
+                return false;
+
+            // for faction mobs, ensure alerter doesn't belong to same faction
+            if (SameFaction(monster))
+                return false;
+
+            // add to retaliate targets?
+
+            //Console.WriteLine($"[{Timers.RunningTime}] - {monster.Name} ({monster.Guid}) - waking up");
+            monster.AttackTarget = this;
+            monster.WakeUp();
+
+            return true;
         }
 
         /// <summary>
@@ -1234,6 +1272,75 @@ namespace ACE.Server.WorldObjects
         public int GetDefenseImbues(ImbuedEffectType imbuedEffectType)
         {
             return EquippedObjects.Values.Count(i => i.GetImbuedEffects().HasFlag(imbuedEffectType));
+        }
+
+        /// <summary>
+        /// Returns the cloak the creature has equipped,
+        /// or 'null' if no cloak is equipped
+        /// </summary>
+        public WorldObject EquippedCloak => EquippedObjects.Values.FirstOrDefault(i => i.ValidLocations == EquipMask.Cloak);
+
+        /// <summary>
+        /// Returns TRUE if creature has cloak equipped
+        /// </summary>
+        public bool HasCloakEquipped => EquippedCloak != null;
+
+        /// <summary>
+        /// Called when a monster attacks another monster
+        /// This should only happen between mobs of differing factions
+        /// </summary>
+        public void MonsterOnAttackMonster(Creature monster)
+        {
+            /*Console.WriteLine($"{Name}.MonsterOnAttackMonster({monster.Name})");
+            Console.WriteLine($"Attackable: {monster.Attackable}");
+            Console.WriteLine($"Tolerance: {monster.Tolerance}");*/
+
+            // monsters will retaliate against monsters who don't belong to the same faction
+            if (Faction1Bits != null && (monster.Faction1Bits == null || (Faction1Bits & monster.Faction1Bits) == 0))
+                monster.AddRetaliateTarget(this);
+
+            if (monster.MonsterState == State.Idle && !monster.Tolerance.HasFlag(Tolerance.NoAttack))
+            {
+                monster.AttackTarget = this;
+                monster.WakeUp();
+            }
+        }
+
+        /// <summary>
+        /// Returns TRUE if creatures are both in the same faction
+        /// </summary>
+        public bool SameFaction(Creature creature)
+        {
+            return Faction1Bits != null && creature.Faction1Bits != null && (Faction1Bits & creature.Faction1Bits) != 0;
+        }
+
+        public bool AllowFactionCombat(Creature creature)
+        {
+            if (Faction1Bits == null && creature.Faction1Bits == null)
+                return false;
+
+            var factionSelf = Faction1Bits ?? FactionBits.None;
+            var factionOther = creature.Faction1Bits ?? FactionBits.None;
+
+            return (factionSelf & factionOther) == 0;
+        }
+
+        public void AddRetaliateTarget(WorldObject wo)
+        {
+            PhysicsObj.ObjMaint.AddRetaliateTarget(wo.PhysicsObj);
+        }
+
+        public bool HasRetaliateTarget(WorldObject wo)
+        {
+            if (wo != null)
+                return PhysicsObj.ObjMaint.RetaliateTargetsContainsKey(wo.Guid.Full);
+            else
+                return false;
+        }
+
+        public void ClearRetaliateTargets()
+        {
+            PhysicsObj.ObjMaint.ClearRetaliateTargets();
         }
     }
 }

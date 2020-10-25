@@ -1,5 +1,8 @@
 using System;
 using System.Numerics;
+
+using ACE.Entity.Enum;
+
 using ACE.Server.Physics.Animation;
 using ACE.Server.Physics.Extensions;
 using ACE.Server.Physics.Util;
@@ -110,31 +113,43 @@ namespace ACE.Server.Physics.Common
                 return reach;
         }
 
+        // custom, based on above
+        public static double CylinderDistanceSq(float radius, float height, Position pos, float otherRadius, float otherHeight, Position otherPos)
+        {
+            var offset = pos.GetOffset(otherPos);
+            var reach = offset.Length() - (radius + otherRadius);
+
+            var diffZ = pos.Frame.Origin.Z <= otherPos.Frame.Origin.Z ? otherPos.Frame.Origin.Z - (pos.Frame.Origin.Z + height) :
+                pos.Frame.Origin.Z - (otherPos.Frame.Origin.Z + otherHeight);
+
+            if (diffZ > 0 && reach > 0)
+                return diffZ * diffZ + reach * reach;
+            else if (diffZ < 0 && reach < 0)
+                return -(diffZ * diffZ + reach * reach);
+            else
+                return reach * reach;
+        }
+
         public static float CylinderDistanceNoZ(float radius, Position pos, float otherRadius, Position otherPos)
         {
             var offset = pos.GetOffset(otherPos);
             return offset.Length() - (radius + otherRadius);
         }
 
+        public static readonly float ThresholdMed = 1.0f / 3.0f;
+        public static readonly float ThresholdHigh = 2.0f / 3.0f;
+
         public Quadrant DetermineQuadrant(float height, Position position)
         {
             var hitpoint = LocalToLocal(position, Vector3.Zero);
 
-            var quadrant = Quadrant.None;
+            var quadrant = hitpoint.X < 0.0f ? Quadrant.Left : Quadrant.Right;
 
-            if (hitpoint.X < 0.0f)
-                quadrant |= Quadrant.Left;
-            else
-                quadrant |= Quadrant.Right;
+            quadrant |= hitpoint.Y >= 0.0f ? Quadrant.Front : Quadrant.Back;
 
-            if (hitpoint.Y >= 0.0f)
-                quadrant |= Quadrant.Front;
-            else
-                quadrant |= Quadrant.Back;
-
-            if (hitpoint.Z < height / 3.0f)
+            if (hitpoint.Z < height * ThresholdMed)
                 quadrant |= Quadrant.Low;
-            else if (hitpoint.Z < height / 1.5f)
+            else if (hitpoint.Z < height * ThresholdHigh)
                 quadrant |= Quadrant.Medium;
             else
                 quadrant |= Quadrant.High;

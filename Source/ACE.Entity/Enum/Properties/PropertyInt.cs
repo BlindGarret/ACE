@@ -363,6 +363,7 @@ namespace ACE.Entity.Enum.Properties
         EquipmentSetId                           = 265,
         PetClass                                 = 266,
         Lifespan                                 = 267,
+        [Ephemeral]
         RemainingLifespan                        = 268,
         UseCreateQuantity                        = 269,
         WieldRequirements2                       = 270,
@@ -376,14 +377,18 @@ namespace ACE.Entity.Enum.Properties
         WieldDifficulty4                         = 278,
         Unique                                   = 279,
         SharedCooldown                           = 280,
+        [SendOnLogin]
         Faction1Bits                             = 281,
         Faction2Bits                             = 282,
         Faction3Bits                             = 283,
         Hatred1Bits                              = 284,
         Hatred2Bits                              = 285,
         Hatred3Bits                              = 286,
+        [SendOnLogin]
         SocietyRankCelhan                        = 287,
+        [SendOnLogin]
         SocietyRankEldweb                        = 288,
+        [SendOnLogin]
         SocietyRankRadblo                        = 289,
         HearLocalSignals                         = 290,
         HearLocalSignalsRadius                   = 291,
@@ -564,6 +569,14 @@ namespace ACE.Entity.Enum.Properties
 
         [ServerOnly]
         PCAPRecordedAutonomousMovement           = 8007,
+        [ServerOnly]
+        PCAPRecordedMaxVelocityEstimated         = 8030,
+        [ServerOnly]
+        PCAPRecordedPlacement                    = 8041,
+        [ServerOnly]
+        PCAPRecordedAppraisalPages               = 8042,
+        [ServerOnly]
+        PCAPRecordedAppraisalMaxPages            = 8043,
 
         //[ServerOnly]
         //TotalLogins                              = 9001,
@@ -694,6 +707,7 @@ namespace ACE.Entity.Enum.Properties
                     return System.Enum.GetName(typeof(PhysicsState), value);
                 case PropertyInt.HookPlacement:
                 case PropertyInt.Placement:
+                case PropertyInt.PCAPRecordedPlacement:
                     return System.Enum.GetName(typeof(Placement), value);
                 case PropertyInt.PortalBitmask:
                     return System.Enum.GetName(typeof(PortalBitmask), value);
@@ -710,6 +724,7 @@ namespace ACE.Entity.Enum.Properties
                 case PropertyInt.WieldSkillType2:
                 case PropertyInt.WieldSkillType3:
                 case PropertyInt.WieldSkillType4:
+                case PropertyInt.AppraisalItemSkill:
                     return System.Enum.GetName(typeof(Skill), value);
                 case PropertyInt.AccountRequirements:
                     return System.Enum.GetName(typeof(SubscriptionStatus), value);

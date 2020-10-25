@@ -10,8 +10,6 @@ namespace ACE.Common.Cryptography
         private uint[] mm;
         private uint[] randRsl;
 
-        public int OverallOffset { get; private set; }
-
         public ISAAC(byte[] seed)
         {
             mm      = new uint[256];
@@ -21,9 +19,21 @@ namespace ACE.Common.Cryptography
             Initialize(seed);
         }
 
-        public uint GetOffset()
+        private bool isReleased;
+
+        public void ReleaseResources()
         {
-            OverallOffset++;
+            isReleased = true;
+            mm = null;
+            randRsl = null;
+        }
+
+        public uint Next()
+        {
+            if (isReleased)
+            {
+                return 0;
+            }
 
             var issacValue = randRsl[offset];
             if (offset > 0)

@@ -305,7 +305,7 @@ namespace ACE.Server.Physics.Common
                 }
             }
             if (checkOutside)
-                LandCell.add_all_outside_cells(numParts, parts, cellArray);
+                LandCell.add_all_outside_cells(numParts, parts, cellArray, ID);
         }
 
         public override void find_transit_cells(Position position, int numSphere, List<Sphere> spheres, CellArray cellArray, SpherePath path)
@@ -453,6 +453,11 @@ namespace ACE.Server.Physics.Common
                     return true;
             }
             return SeenOutside && blockDist <= 1;
+        }
+
+        public override bool handle_move_restriction(Transition transition)
+        {
+            return true;
         }
     }
 }
