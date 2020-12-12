@@ -38,7 +38,7 @@ namespace ACE.Server.Factories
 
         public static List<WorldObject> CreateRandomLootObjects(TreasureDeath profile)
         {
-            if (PropertyManager.GetBool("updated_loot_system").Item)
+            if (!PropertyManager.GetBool("legacy_loot_system").Item)
                 return CreateRandomLootObjects_New(profile);
 
             stopwatch.Value.Restart();
@@ -916,7 +916,7 @@ namespace ACE.Server.Factories
 
                 case TreasureItemType_Orig.Caster:
 
-                    treasureRoll.Wcid = CasterWcids.Roll(treasureDeath);
+                    treasureRoll.Wcid = CasterWcids.Roll(treasureDeath.Tier);
                     break;
 
                 case TreasureItemType_Orig.ManaStone:
@@ -1172,6 +1172,30 @@ namespace ACE.Server.Factories
                 return $"{wo.Name} of {descriptor}";
             else
                 return null;
+        }
+
+        private static void RollWieldLevelReq_T7_T8(WorldObject wo, TreasureDeath profile)
+        {
+            if (profile.Tier < 7)
+                return;
+
+            var wieldLevelReq = 150;
+
+            if (profile.Tier == 8)
+            {
+                // t8 had a 90% chance for 180
+                // loot quality mod?
+                var rng = ThreadSafeRandom.Next(0.0f, 1.0f);
+
+                if (rng < 0.9f)
+                    wieldLevelReq = 180;
+            }
+
+            wo.WieldRequirements = WieldRequirement.Level;
+            wo.WieldDifficulty = wieldLevelReq;
+
+            // as per retail pcaps, must be set to appear in client
+            wo.WieldSkillType = 1;  
         }
     }         
 }
